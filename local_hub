@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+echo "local_hub $@"
+
+node "$SAGEMATHCLOUD"/node_modules/local_hub.js $@
+

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -e
+
+echo "Read SageMathCloud environment variables."
+. $HOME/.sagemathcloud/sagemathcloud-env
+
+echo "Rebuild any modified coffeescript"
+make_coffee
+
+local_hub      start
+console_server start  &
+sage_server    start  &
+

@@ -1,0 +1,51 @@
+#!/usr/bin/env python
+
+import json, os, sys
+
+SMC = os.path.join(os.environ['HOME'], '.sagemathcloud/')
+os.chdir(SMC)
+
+status = {}
+
+def done():
+    print json.dumps(status)
+    sys.exit(0)
+
+def set(prop, val):
+    status[prop] = val
+    if val is False:
+        done()
+def read(prop, filename, strip=False):
+    try:
+        s = open(filename).read()
+        if strip:
+            s = s.strip()
+        status[prop] = s
+    except:
+        status[prop] = False
+        done()
+
+read('version', os.path.join(SMC, "version"), strip=True)
+
+# a simple test that the node modules are probably installed.
+set('installed', os.path.exists(os.path.join(SMC, 'installed')))
+
+for name in ['secret_token', 'local_hub.port']:
+    read(name, os.path.join(SMC, 'data', name))
+
+## set('disk_usage', int(os.popen('du -s "%s"'%project_path).read().split()[0]))
+
+for daemon in ['local_hub', 'sage_server', 'console_server']:
+    pidfile = os.path.join(SMC, 'data', daemon) + '.pid'
+    if os.path.exists(pidfile):
+        try:
+            pid = int(open(pidfile).read())
+            os.kill(pid, 0)
+            set(daemon, pid)
+        except:
+            set(daemon, False)
+    else:
+        set(daemon, False)
+
+done()
+
