@@ -230,8 +230,8 @@ class InteractFunction(object):
             I._controls[arg] = new_control
             desc = new_control.jsonable()
         # set the id of the containing interact
-        desc['id'] = self.interact_cell._uuid
-        salvus.javascript("cell._set_interact_var(obj)", obj=jsonable(desc))
+        desc['id'] = I._uuid
+        salvus.javascript("worksheet.set_interact_var(obj)", obj=jsonable(desc))
 
     def __getattr__(self, arg):
         I = self.__dict__['interact_cell']
@@ -247,7 +247,8 @@ class InteractFunction(object):
             del I._controls[arg]
         except KeyError:
             pass
-        salvus.javascript("cell._del_interact_var(obj)", obj=jsonable(arg))
+        desc = {'id':I._uuid, 'name':arg}
+        salvus.javascript("worksheet.del_interact_var(obj)", obj=jsonable(desc))
 
     def changed(self):
         """
@@ -434,14 +435,16 @@ class Interact(object):
             new_control = interact_control(arg, value)
             I._controls[arg] = new_control
             desc = new_control.jsonable()
-        salvus.javascript("cell._set_interact_var(obj)", obj=desc)
+        desc['id'] = I._uuid
+        salvus.javascript("worksheet.set_interact_var(obj)", obj=desc)
 
     def __delattr__(self, arg):
         try:
             del interact_exec_stack[-1]._controls[arg]
         except KeyError:
             pass
-        salvus.javascript("cell._del_interact_var(obj)", obj=jsonable(arg))
+        desc['id'] = I._uuid
+        salvus.javascript("worksheet.del_interact_var(obj)", obj=jsonable(arg))
 
     def __getattr__(self, arg):
         try:
@@ -1800,13 +1803,24 @@ def show_3d_plot(obj, **kwds):
 from sage.plot.graphics import Graphics, GraphicsArray
 from sage.plot.plot3d.base import Graphics3d
 
-def show(obj, svg=True, **kwds):
+def show(obj, svg=False, **kwds):
+    """
+    Show an expression, typeset nicely in tex, or a 2d or 3d graphics object.
+
+       - svg: (default False); if true, render graphics using svg.  This is False by default,
+         since at least Google Chrome mis-renders this as empty:
+              line([(10, 0), (10, 15)], color='black').show(svg=True)
+
+       - display: (default: True); if true use display math for expression (big and centered).
+    """
     if isinstance(obj, (Graphics, GraphicsArray)):
         show_2d_plot(obj, svg=svg, **kwds)
     elif isinstance(obj, Graphics3d):
         show_3d_plot(obj, **kwds)
     else:
-        salvus.tex(obj, display=True, **kwds)
+        if 'display' not in kwds:
+            kwds['display'] = True
+        salvus.tex(obj, **kwds)
 
 # Make it so plots plot themselves correctly when they call their repr.
 Graphics.show = show
@@ -2028,30 +2042,6 @@ def exercise(code):
                 return False, "too low"
             if c > 0:
                 return False, "too high"
-    
-    Dynamic feedback without a specific set answer::
-
-        %exercise
-        title    = r"Find a basis for the nullspace"
-        rank = randint(2,4)
-        A        = random_matrix(QQ,5,algorithm='echelonizable', rank=rank,upper_bound=10)
-        kernel = A.T.kernel()
-        question = "Find a basis for the nullspace of $%s$.  Your answer should be a list of vectors (e.g., '[(1,2,3,4,5), (5,4,3,2,1)]' )"%latex(A)
-        def check(a):
-            try:
-                a = sage_eval(a)
-            except:
-                return False, "There was an error parsing your answer. Your answer should be a list of vectors (e.g., '[(1,2,3,4,5), (5,4,3,2,1)]' )."
-            i = [vector(QQ,j) for j in a]
-            v = span(i)
-            if v.dimension()!=len(i):
-                return False, "Are your vectors linearly independent?"
-            elif v != kernel:
-                return False, "You are missing some vectors"
-            else:
-                return True, "Great job!"
-        hints = ["The RREF is $%s$."%latex(A.rref())]
-        hints.append(" ".join(hints)+"  The nullity is %d."%kernel.dimension())
     """
     f = closure(code)
     def g():
@@ -2155,7 +2145,7 @@ def dynamic(*args, **kwds):
 
 
 import sage.all
-def var(args, **kwds):
+def var(*args, **kwds):
     """
     Create symbolic variables and inject them into the global namespace.
 
@@ -2250,7 +2240,16 @@ def md(s):
          'smarty-pants', 'wiki-tables'
 
     See https://github.com/trentm/python-markdown2/wiki/Extras
+    We also use markdown2Mathjax so that LaTeX is properly
+    typeset in $'s and $$'s.
     """
-    import markdown2
+    from markdown2Mathjax import sanitizeInput, reconstructMath
+    from markdown2 import markdown
+
+    tmp = sanitizeInput(s)
     extras = ['code-friendly', 'footnotes', 'smarty-pants', 'wiki-tables']
-    html(markdown2.markdown(s, extras=extras))
+    markedDownText = markdown(tmp[0], extras=extras)
+    html(reconstructMath(markedDownText,tmp[1]))
+
+
+
