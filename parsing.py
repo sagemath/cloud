@@ -34,6 +34,21 @@ def get_input(prompt):
     except EOFError:
         return None
 
+def strip_leading_prompts(code, prompts=['sage:', '....:', '...:', '>>>', '...']):
+    code, literals, state = strip_string_literals(code)
+    code2 = []
+    for line in code.splitlines():
+        line2 = line.lstrip()
+        for p in prompts:
+            if line2.startswith(p):
+                line2 = line2[len(p):]
+                if p[0] != '.':
+                    line2 = line2.lstrip()
+                break
+        code2.append(line2)
+    code = ('\n'.join(code2))%literals
+    return code
+
 def preparse_code(code):
     import sage.all_cmdline
     return sage.all_cmdline.preparse(code)
@@ -179,21 +194,29 @@ def divide_into_blocks(code):
     except Exception, mesg:
         code = c
 
-    code = [x for x in code if x.strip()]  # take only non-empty lines now for Python code.
-    
+    ## Tested this: Completely disable block parsing:
+    ## but it requires the caller to do "exec compile(block+'\n', '', 'exec') in namespace, locals", which means no display hook,
+    ## so "2+2" breaks.
+    ## return [[0,len(code)-1,('\n'.join(code))%literals]]
+
+
+    # take only non-empty lines now for Python code.
+    code = [x for x in code if x.strip()]
+
     # Compute the blocks
-    blocks = []
-    ## Attempt to completely disable block parsing (didn't work)
-    ##blocks = [[0,len(code)-1,('\n'.join(code))%literals]]
-    ##return blocks
-
-
     i = len(code)-1
     blocks = []
     while i >= 0:
         stop = i
-        while i>=0 and len(code[i]) > 0 and code[i][0] in string.whitespace:
+        paren_depth = code[i].count('(') - code[i].count(')')
+        brack_depth = code[i].count('[') - code[i].count(']')
+        curly_depth = code[i].count('{') - code[i].count('}')
+        while i>=0 and ((len(code[i]) > 0 and (code[i][0] in string.whitespace or code[i][:2] == '%(')) or paren_depth < 0 or brack_depth < 0 or curly_depth < 0):
             i -= 1
+            if i >= 0:
+                paren_depth += code[i].count('(') - code[i].count(')')
+                brack_depth += code[i].count('[') - code[i].count(']')
+                curly_depth += code[i].count('{') - code[i].count('}')
         # remove comments
         for k, v in literals.iteritems():
             if v.startswith('#'):
@@ -210,8 +233,8 @@ def divide_into_blocks(code):
     while i < len(blocks):
         s = blocks[i][-1].lstrip()
         # TODO: there shouldn't be 5 identical bits of code below!!!
-        if s.startswith('finally:') or s.startswith('except'):
-            if blocks[i-1][-1].lstrip().startswith('try:'):
+        if s.startswith('finally') or s.startswith('except'):
+            if blocks[i-1][-1].lstrip().startswith('try'):
                 blocks[i-1][-1] += '\n' + blocks[i][-1]
                 blocks[i-1][1] = blocks[i][1]
                 del blocks[i]
@@ -219,15 +242,11 @@ def divide_into_blocks(code):
             blocks[i-1][-1] += '\n' + blocks[i][-1]
             blocks[i-1][1] = blocks[i][1]
             del blocks[i]
-        elif s.startswith('else') and blocks[i-1][-1].lstrip().startswith('if'):
+        elif s.startswith('else') and (blocks[i-1][-1].lstrip().startswith('if') or blocks[i-1][-1].lstrip().startswith('while') or blocks[i-1][-1].lstrip().startswith('for') or blocks[i-1][-1].lstrip().startswith('elif')):
             blocks[i-1][-1] += '\n' + blocks[i][-1]
             blocks[i-1][1] = blocks[i][1]
             del blocks[i]
         elif s.startswith('elif') and blocks[i-1][-1].lstrip().startswith('if'):
-            blocks[i-1][-1] += '\n' + blocks[i][-1]
-            blocks[i-1][1] = blocks[i][1]
-            del blocks[i]
-        elif s.startswith('else') and blocks[i-1][-1].lstrip().startswith('elif'):
             blocks[i-1][-1] += '\n' + blocks[i][-1]
             blocks[i-1][1] = blocks[i][1]
             del blocks[i]

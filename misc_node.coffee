@@ -30,14 +30,16 @@ net = require('net')
 # data is just a JSON-able object.  When type='blob', data={uuid:..., blob:...};
 # since every blob is tagged with a uuid.
 
+fs = require('fs')
+
 misc = require 'misc'
 
 {walltime, defaults, required, to_json} = misc
 
 message = require 'message'
 
-exports.enable_mesg = enable_mesg = (socket) ->
-    socket.setMaxListeners(200)  # we use a lot of listeners for listening for messages
+exports.enable_mesg = enable_mesg = (socket, desc) ->
+    socket.setMaxListeners(500)  # we use a lot of listeners for listening for messages
     socket._buf = null
     socket._buf_target_length = -1
     socket._listen_for_mesg = (data) ->
@@ -59,11 +61,12 @@ exports.enable_mesg = enable_mesg = (socket) ->
                         try
                             obj = JSON.parse(s)
                         catch e
-                            winston.debug("Error parsing JSON message '#{s}'")
+                            winston.debug("Error parsing JSON message='#{misc.truncate(s,512)}' on socket #{desc}")
                             # TODO -- this throw can seriously mess up the server; handle this
                             # in a better way in production.  This could happen if there is
                             # corruption of the connection.
-                            throw(e)
+                            #throw(e)
+                            return
                         socket.emit('mesg', 'json', obj)
                     when 'b'   # BLOB (tagged by a uuid)
                         socket.emit('mesg', 'blob', {uuid:mesg.slice(0,36).toString(), blob:mesg.slice(36)})
@@ -88,8 +91,15 @@ exports.enable_mesg = enable_mesg = (socket) ->
             if typeof s == "string"
                 s = Buffer(s)
             buf.writeInt32BE(s.length, 0)
-            socket.write(buf)
-            socket.write(s, cb)
+            if not socket.writable
+                cb?("socket not writable")
+            else
+                socket.write(buf)
+
+            if not socket.writable
+                cb?("socket not writable")
+            else
+                socket.write(s, cb)
         switch type
             when 'json'
                 send('j' + JSON.stringify(data))
@@ -156,12 +166,13 @@ exports.unlock_socket = (socket, token, cb) ->     # cb(err)
             cb("Invalid secret token.")
     socket.on('data', listener)
 
-# Connect to a locked socket on localhost, unlock it, and do cb(err,
-# unlocked_socket).  We do not allow connection to any other host,
-# since this is not an *encryption* protocol; fortunately, traffic on
-# localhost can't be sniffed (except as root, of course, when it can be).
+# Connect to a locked socket on host, unlock it, and do
+#       cb(err, unlocked_socket).
+# WARNING: Use only on an encrypted VPN, since this is not
+# an *encryption* protocol.
 exports.connect_to_locked_socket = (opts) ->
-    {port, token, timeout, cb} = defaults opts,
+    {port, host, token, timeout, cb} = defaults opts,
+        host    : 'localhost'
         port    : required
         token   : required
         timeout : 5
@@ -177,7 +188,7 @@ exports.connect_to_locked_socket = (opts) ->
 
     timer = setTimeout(timed_out, timeout*1000)
 
-    socket = net.connect {port:port}, () =>
+    socket = net.connect {host:host, port:port}, () =>
         listener = (data) ->
             winston.debug("misc_node: got back response: #{data}")
             socket.removeListener('data', listener)
@@ -193,6 +204,12 @@ exports.connect_to_locked_socket = (opts) ->
         socket.on 'data', listener
         winston.debug("misc_node: connected, now sending secret token")
         socket.write(token)
+
+    # This is called in case there is an error trying to make the connection, e.g., "connection refused".
+    socket.on "error", (err) =>
+        if timer?
+            clearTimeout(timer)
+        cb(err)
 
 
 # Compute a uuid v4 from the Sha-1 hash of data.
@@ -223,7 +240,7 @@ async          = require('async')
 fs             = require('fs')
 child_process  = require 'child_process'
 
-exports.execute_code = (opts) ->
+exports.execute_code = execute_code = (opts) ->
     opts = defaults opts,
         command    : required
         args       : []
@@ -236,7 +253,7 @@ exports.execute_code = (opts) ->
         uid        : undefined
         gid        : undefined
         env        : undefined   # if given, added to exec environment
-        cb         : required
+        cb         : undefined
 
     start_time = walltime()
     winston.debug("execute_code: \"#{opts.command} #{opts.args.join(' ')}\"")
@@ -260,7 +277,7 @@ exports.execute_code = (opts) ->
     env = misc.copy(process.env)
 
     if opts.env?
-        for k, v of opt.env
+        for k, v of opts.env
             env[k] = v
 
     if opts.uid?
@@ -366,7 +383,11 @@ exports.execute_code = (opts) ->
                 f = () ->
                     if r.exitCode == null
                         winston.debug("execute_code: subprocess did not exit after #{opts.timeout} seconds, so killing with SIGKILL")
-                        r.kill("SIGKILL")  # this does not kill the process group :-(
+                        try
+                            r.kill("SIGKILL")  # this does not kill the process group :-(
+                        catch e
+                            # Exceptions can happen, which left uncaught messes up calling code bigtime.
+                            winston.debug("execute_code: r.kill raised an exception.")
                         if not callback_done
                             callback_done = true
                             c("killed command '#{opts.command} #{opts.args.join(' ')}'")
@@ -382,6 +403,7 @@ exports.execute_code = (opts) ->
         if tmpfilename?
             fs.unlink(tmpfilename)
 
+        winston.debug("finished exec of #{opts.command}")
         if not opts.err_on_exit and ran_code
             # as long as we made it to running some code, we consider this a success (that is what err_on_exit means).
             opts.cb?(false, {stdout:stdout, stderr:stderr, exit_code:exit_code})
@@ -389,6 +411,19 @@ exports.execute_code = (opts) ->
             opts.cb?(err, {stdout:stdout, stderr:stderr, exit_code:exit_code})
     )
 
+
+####
+## Applications of execute_code
+
+exports.disk_usage = (path, cb) ->  # cb(err, usage in K (1024 bytes) of path)
+    exports.execute_code
+        command : "du"
+        args    : ['-s', path]
+        cb      : (err, output) ->
+            if err
+                cb(err)
+            else
+                cb(false, parseInt(output.stdout.split(' ')[0]))
 
 
 ###################################
@@ -426,16 +461,26 @@ exports.unforward_all_ports = () ->
     for port, r of local_port_to_child_process
         r.kill("SIGKILL")
 
+free_port = exports.free_port = (cb) ->    # cb(err, available port as assigned by the operating system)
+    server = require("net").createServer()
+    port = 0
+    server.on "listening", () ->
+        port = server.address().port
+        server.close()
+    server.on "close", ->
+        cb(null, port)
+    server.listen(0)
+
 exports.forward_remote_port_to_localhost = (opts) ->
     opts = defaults opts,
         username    : required
         host        : required
         ssh_port    : 22
         remote_port : required
-        activity_time : 1800 # kill connection if the HUB doesn't
+        activity_time : 2000 # kill connection if the HUB doesn't
                              # actively *receive* something on this
                              # port for this many seconds.
-        keep_alive_time :  5 # network activity every this many
+        keep_alive_time:2000 # network activity every this many
                              # seconds.; lower to more quickly detect
                              # a broken connection; raise to reduce resources
         cb          : required  # cb(err, local_port)
@@ -453,20 +498,21 @@ exports.forward_remote_port_to_localhost = (opts) ->
     winston.debug("Forward a remote port #{opts.remote_port} on #{opts.host} to localhost.")
 
     remote_address = "#{opts.username}@#{opts.host}:#{opts.remote_port} -p#{opts.ssh_port}"
-    local_port = address_to_local_port[remote_address]
 
+    ###
+    local_port = address_to_local_port[remote_address]
     if local_port?
         # We already have a valid forward
         opts.cb(false, local_port)
         return
+    ###
 
     # We have to make a new port forward
-    portfinder = require('portfinder')
-    portfinder.basePort = Math.floor(Math.random()*50000)+8000  # avoid race condition...
-    portfinder.getPort (err, local_port) ->
+    free_port (err, local_port) ->
         if err
             opts.cb(err)
             return
+        winston.debug("forward_remote_port_to_local_host: local port #{local_port} available")
         command = "ssh"
         args =  ['-o', 'StrictHostKeyChecking=no', "-p", opts.ssh_port,
                  '-L', "#{local_port}:localhost:#{opts.remote_port}",
@@ -498,7 +544,7 @@ exports.forward_remote_port_to_localhost = (opts) ->
             new_output = false
 
         # check every few seconds
-        kill_no_output_timer = setInterval(kill_if_no_new_output, 2*1000*opts.keep_alive_time)
+        kill_no_output_timer = setInterval(kill_if_no_new_output, 1000*opts.keep_alive_time)
 
         kill_if_no_new_activity = () ->
             if not r.activity?
@@ -516,3 +562,68 @@ exports.forward_remote_port_to_localhost = (opts) ->
             delete address_to_local_port[remote_address]
             clearInterval(kill_no_output_timer)
             clearInterval(kill_no_activity_timer)
+
+
+
+
+
+# Any non-absolute path is assumed to be relative to the user's home directory.
+# This function converts such a path to an absolute path.
+exports.abspath = abspath = (path) ->
+    if path.length == 0
+        return process.env.HOME
+    if path[0] == '/'
+        return path  # already an absolute path
+    return process.env.HOME + '/' + path
+
+# Other path related functions...
+
+# Make sure that that the directory containing the file indicated by
+# the path exists and has restrictive permissions.
+ensure_containing_directory_exists = (path, cb) ->   # cb(err)
+    path = abspath(path)
+    dir = misc.path_split(path).head  # containing path
+
+    fs.exists dir, (exists) ->
+        if exists
+            cb?()
+        else
+            async.series([
+                (cb) ->
+                    if dir != ''
+                        # recursively make sure the entire chain of directories exists.
+                        ensure_containing_directory_exists(dir, cb)
+                    else
+                        cb()
+                (cb) ->
+                    fs.mkdir(dir, 0o700, cb)
+            ], (err) -> cb?(err))
+
+exports.ensure_containing_directory_exists = ensure_containing_directory_exists
+
+
+# Determine if path (file or directory) is writable -- this works even if permissions are right but
+# filesystem is read only, e.g., ~/.zfs/snapshot/...
+# It's an error if the path doesn't exist.
+exports.is_file_readonly = (opts) ->
+    opts = defaults opts,
+        path : required
+        cb   : required    # cb(err, true if read only (false otherwise))
+    readonly = undefined
+    # determine if file is writable
+    execute_code
+        command     : 'find'
+        args        : [opts.path, '-maxdepth', '0', '-writable']
+        err_on_exit : false
+        cb          : (err, output) =>
+            if err
+                opts.cb(err)
+            else if output.stderr or output.exit_code
+                opts.cb("no such path '#{opts.path}'")
+            else
+                readonly = output.stdout.length == 0
+                opts.cb(undefined, readonly)
+
+
+
+

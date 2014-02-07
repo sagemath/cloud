@@ -4,8 +4,8 @@ sage_server.py -- unencrypted forking TCP server.
 
 Note: I wrote functionality so this can run as root, create accounts on the fly,
 and serve sage as those accounts.  Doing this is horrendous from a security point of
-view, and I'm definitely not doing this.
-
+view, and I'm definitely not doing this.  None of that functionality is actually
+used in https://cloud.sagemath.com!
 
 For debugging, this may help:
 
@@ -32,6 +32,7 @@ import os, sys
 PWD = os.path.split(os.path.realpath(__file__))[0]
 sys.path.insert(0, PWD)
 
+
 LOGFILE = os.path.realpath(__file__)[:-3] + ".log"
 # This can be useful, just in case.
 def log(s):
@@ -45,9 +46,34 @@ import sagenb.notebook.interact
 
 # Standard imports.
 import json, resource, shutil, signal, socket, struct, \
-       tempfile, time, traceback, uuid, pwd
+       tempfile, time, traceback, pwd
 
 import parsing, sage_salvus
+
+uuid = sage_salvus.uuid
+
+def unicode8(s):
+    # I evidently don't understand Python unicode...  Do the following for now:
+    try:
+        return unicode(s, 'utf8')
+    except:
+        try:
+             return unicode(s)
+        except:
+             return s
+
+# Determine the info object, if available.  There's no good reason
+# it wouldn't be available, unless a user explicitly deleted it, but
+# we may as well try to be robust to this, especially if somebody
+# were to try to use this server outside of cloud.sagemath.com.
+_info_path = os.path.join(os.environ['SAGEMATHCLOUD'], 'info.json')
+if os.path.exists(_info_path):
+    INFO = json.loads(open(_info_path).read())
+else:
+    INFO = {}
+if 'base_url' not in INFO:
+    INFO['base_url'] = ''
+
 
 # Configure logging
 #logging.basicConfig()
@@ -72,7 +98,7 @@ def uuidsha1(data):
 # A tcp connection with support for sending various types of messages, especially JSON.
 class ConnectionJSON(object):
     def __init__(self, conn):
-        assert not isinstance(conn, ConnectionJSON)
+        assert not isinstance(conn, ConnectionJSON)  # avoid common mistake -- conn is supposed to be from socket.socket...
         self._conn = conn
 
     def close(self):
@@ -86,9 +112,9 @@ class ConnectionJSON(object):
         self._send('j' + json.dumps(m))
 
     def send_blob(self, blob):
-        uuid = uuidsha1(blob)
-        self._send('b' + uuid + blob)
-        return uuid
+        s = uuidsha1(blob)
+        self._send('b' + s + blob)
+        return s
 
     def send_file(self, filename):
         return self.send_blob(open(filename, 'rb').read())
@@ -153,10 +179,10 @@ class Message(object):
     def execute_code(self, id, code, preparse=True):
         return self._new('execute_code', locals())
 
-    def execute_javascript(self, code, data=None, coffeescript=False):
+    def execute_javascript(self, code, obj=None, coffeescript=False):
         return self._new('execute_javascript', locals())
 
-    def output(self, id, stdout=None, stderr=None, html=None, javascript=None, coffeescript=None, interact=None, obj=None, tex=None, file=None, done=None, once=None, hide=None, show=None, auto=None):
+    def output(self, id, stdout=None, stderr=None, html=None, javascript=None, coffeescript=None, interact=None, obj=None, tex=None, file=None, done=None, once=None, hide=None, show=None, auto=None, events=None, clear=None):
         m = self._new('output')
         m['id'] = id
         if stdout is not None and len(stdout) > 0: m['stdout'] = stdout
@@ -173,6 +199,8 @@ class Message(object):
         if hide is not None: m['hide'] = hide
         if show is not None: m['show'] = show
         if auto is not None: m['auto'] = auto
+        if events is not None: m['events'] = events
+        if clear is not None: m['clear'] = clear
         return m
 
     def introspect_completions(self, id, completions, target):
@@ -336,10 +364,22 @@ class Namespace(dict):
             for f in self._on_change[None]:
                 f(x,y)
 
+class TemporaryURL:
+    def __init__(self, url, ttl):
+        self.url = url
+        self.ttl = ttl
+    def __repr__(self):
+        return repr(self.url)
+    def __str__(self):
+        return self.url
+
 namespace = Namespace({})
 
 class Salvus(object):
     Namespace = Namespace
+    _prefix       = ''
+    _postfix      = ''
+    _default_mode = 'sage'
 
     def _flush_stdio(self):
         """
@@ -352,12 +392,14 @@ class Salvus(object):
     def __repr__(self):
         return ''
 
-    def __init__(self, conn, id, data=None):
+    def __init__(self, conn, id, data=None, message_queue=None):
         self._conn = conn
         self._id   = id
         self._done = True    # done=self._done when last execute message is sent; e.g., set self._done = False to not close cell on code term.
         self.data = data
         self.namespace = namespace
+        self.message_queue = message_queue
+        self.code_decorators = [] # gets reset if there are code decorators
         namespace['salvus'] = self   # beware of circular ref?
         # Monkey patch in our "require" command.
         namespace['require'] = self.require
@@ -369,39 +411,262 @@ class Salvus(object):
         self._conn.send_json(message.output(obj=obj, id=self._id, done=done))
         return self
 
-    def file(self, filename, show=True, done=False, download=False, once=None):
+    def link(self, filename, label=None, foreground=True, cls=''):
         """
-        Sends a file to the browser and returns a uuid that can be
-        used to access the file (for 10 minutes) at
+        Output a clickable link to a file somewhere in this project.  The filename
+        path must be relative to the current working directory of the Python process.
 
-                /blobs/filename?uuid=the_uuid
+        The simplest way to use this is
 
-        If show is true (the default), the browser will show the file
-        as well, or provide a link to it.
+             salvus.link("../name/of/file")    # any relative path to any file
 
-        If you instead use the URL
+        This creates a link, which when clicked on, opens that file in the foreground.
 
-               /blobs/filename?uuid=the_uuid&download
+        If the filename is the name of a directory, clicking will instead
+        open the file browser on that directory:
 
-        the server will include a header that tells the browser to
-        download the file to disk instead of displaying it.
+             salvus.link("../name/of/directory")    # clicking on the resulting link opens a directory
 
-        If show=False, only returns the url (and sends JSON message with show:false).
-        This can be useful for constructing custom HTML that directly accesses blobs.
+        If you would like a button instead of a link, pass cls='btn'.  You can use any of
+        the standard Bootstrap button classes, e.g., btn-small, btn-large, btn-success, etc.
+
+        If you would like to change the text in the link (or button) to something
+        besides the default (filename), just pass arbitrary HTML to the label= option.
+
+        INPUT:
+
+        - filename -- a relative path to a file or directory
+        - label -- (default: the filename) html label for the link
+        - foreground -- (default: True); if True, opens link in the foreground
+        - cls -- (default: '') optional CSS classes, such as 'btn'.
+
+        EXAMPLES:
+
+        Use as a line decorator::
+
+            %salvus.link name/of/file.foo
+
+        Make a button::
+
+            salvus.link("foo/bar/", label="The Bar Directory", cls='btn')
+
+        Make two big blue buttons with plots in them::
+
+            plot(sin, 0, 20).save('sin.png')
+            plot(cos, 0, 20).save('cos.png')
+            for img in ['sin.png', 'cos.png']:
+                salvus.link(img, label="<img width='150px' src='%s'>"%salvus.file(img, show=False), cls='btn btn-large btn-primary')
+
+
+
         """
+        path = os.path.abspath(filename)[len(os.environ['HOME'])+1:]
+        if label is None:
+            label = filename
+        id = uuid()
+        self.html("<a class='%s' style='cursor:pointer'; id='%s'></a>"%(cls, id))
+
+        s = "$('#%s').html(obj.label).click(function() {%s; return false;});"%(id, self._action(path, foreground))
+        self.javascript(s, obj={'label':label, 'path':path, 'foreground':foreground}, once=False)
+
+    def _action(self, path, foreground):
+        if os.path.isdir(path):
+            action = "worksheet.project_page.chdir(obj.path);"
+            if foreground:
+                action += "worksheet.project_page.display_tab('project-file-listing');"
+        else:
+            action = "worksheet.project_page.open_file({'path':obj.path, 'foreground': obj.foreground});"
+        return action
+
+    def open_tab(self, filename, foreground=True):
+        """
+        Open a new file (or directory) document in another tab.
+        See the documentation for salvus.link.
+        """
+        path = os.path.abspath(filename)[len(os.environ['HOME'])+1:]
+        self.javascript(self._action(path, foreground),
+                         obj = {'path':path, 'foreground':foreground}, once=True)
+
+    def close_tab(self, filename):
+        """
+        Open an open file tab.  The filename is relative to the current working directory.
+        """
+        self.javascript("worksheet.editor.close(obj)", obj = filename, once=True)
+
+
+    #def open_project(self, project_id):
+    #def close_project(self, project_id):
+
+    def file(self, filename, show=True, done=False, download=False, once=False, events=None, raw=False):
+        """
+        Display or provide a link to the given file.  Raises a RuntimeError if this
+        is not possible, e.g, if the file is too large.
+
+        If show=True (the default), the browser will show the file,
+        or provide a clickable link to it if there is no way to show it.
+
+        If show=False, this function returns an object T such that
+        T.url (or str(t)) is a string of the form "/blobs/filename?uuid=the_uuid"
+        that can be used to access the file even if the file is immediately
+        deleted after calling this function (the file is stored in a database).
+        Also, T.ttl is the time to live (in seconds) of the object.  A ttl of
+        0 means the object is permanently available.
+
+        raw=False (the default):
+            If you use the URL
+                   /blobs/filename?uuid=the_uuid&download
+            then the server will include a header that tells the browser to
+            download the file to disk instead of displaying it.  Only relatively
+            small files can be made available this way.  However, they remain
+            available (for a day) even *after* the file is deleted.
+            NOTE: It is safe to delete the file immediately after this
+            function (salvus.file) returns.
+
+        raw=True:
+            Instead, the URL is to the raw file, which is served directly
+            from the project:
+                   /project-id/raw/path/to/filename
+            This will only work if the file is not deleted; however, arbitrarily
+            large files can be streamed this way.
+
+        NOTE: If the filename ends in webm, raw=True is always used, since raw=False
+        doesn't work properly with some browsers.
+
+        This function creates an output message {file:...}; if the user saves
+        a worksheet containing this message, then any referenced blobs are made
+        permanent in the database.
+
+        The uuid is based on the Sha-1 hash of the file content (it is computed using the
+        function sage_server.uuidsha1).  Any two files with the same content have the
+        same Sha1 hash.
+        """
+        filename = unicode8(filename)
+        if os.path.splitext(filename)[1] == u'.webm':
+            raw = True
+
+        if raw:
+            info = self.project_info()
+            path = os.path.abspath(filename)
+            home = os.environ[u'HOME'] + u'/'
+            if path.startswith(home):
+                path = path[len(home):]
+            else:
+                raise ValueError(u"can only send raw files in your home directory")
+            url  = os.path.join(u'/',info['base_url'].strip('/'), info['project_id'], u'raw', path.lstrip('/'))
+            if show:
+                self._flush_stdio()
+                self._conn.send_json(message.output(id=self._id, once=once, file={'filename':filename, 'url':url, 'show':show}, events=events))
+                return
+            else:
+                return TemporaryURL(url=url, ttl=0)
+
         file_uuid = self._conn.send_file(filename)
+
+        mesg = None
+        while mesg is None:
+            self.message_queue.recv()
+            for i, (typ, m) in enumerate(self.message_queue.queue):
+                if typ == 'json' and m['event'] == 'save_blob' and m['sha1'] == file_uuid:
+                    mesg = m
+                    del self.message_queue[i]
+                    break
+
+        if 'error' in mesg:
+            raise RuntimeError("error saving blob -- " + mesg['error'])
+
         self._flush_stdio()
-        self._conn.send_json(message.output(id=self._id, once=once, file={'filename':filename, 'uuid':file_uuid, 'show':show}))
+        self._conn.send_json(message.output(id=self._id, once=once, file={'filename':filename, 'uuid':file_uuid, 'show':show}, events=events))
         if not show:
-            url = "/blobs/%s?uuid=%s"%(filename, file_uuid)
+            info = self.project_info()
+            url = u"%s/blobs/%s?uuid=%s"%(info['base_url'], filename, file_uuid)
             if download:
-                url += '?download'
-            return url
+                url += u'?download'
+            return TemporaryURL(url=url, ttl=mesg['ttl'])
+
+    def default_mode(self, mode=None):
+        """
+        Set the default mode for cell evaluation.  This is equivalent
+        to putting %mode at the top of any cell that does not start
+        with %.   Use salvus.default_mode() to return the current mode.
+        Use salvus.default_mode("") to have no default mode.
+
+        This is implemented using salvus.cell_prefix.
+        """
+        if mode is None:
+            return Salvus._default_mode
+        Salvus._default_mode = mode
+        if mode == "sage":
+            self.cell_prefix("")
+        else:
+            self.cell_prefix("%" + mode)
+
+    def cell_prefix(self, prefix=None):
+        """
+        Make it so that the given prefix code is textually
+        prepending to the input before evaluating any cell, unless
+        the first character of the cell is a %.
+
+        To append code at the end, use cell_postfix.
+
+        INPUT:
+
+        - ``prefix`` -- None (to return prefix) or a string ("" to disable)
+
+        EXAMPLES:
+
+        Make it so every cell is timed:
+
+            salvus.cell_prefix('%time')
+
+        Make it so cells are typeset using latex, and latex comments are allowed even
+        as the first line.
+
+            salvus.cell_prefix('%latex')
+
+            %sage salvus.cell_prefix('')
+
+        Evaluate each cell using GP (Pari) and display the time it took:
+
+            salvus.cell_prefix('%time\n%gp')
+
+            %sage salvus.cell_prefix('')   # back to normal
+        """
+        if prefix is None:
+            return Salvus._prefix
+        else:
+            Salvus._prefix = prefix
+
+    def cell_postfix(self, postfix=None):
+        """
+        Make it so that the given code is textually
+        appended to the input before evaluating a cell.
+        To prepend code at the beginning, use cell_prefix.
+
+        INPUT:
+
+        - ``postfix`` -- None (to return postfix) or a string ("" to disable)
+
+        EXAMPLES:
+
+        Print memory usage after evaluating each cell:
+
+            salvus.cell_postfix('print "%s MB used"%int(get_memory_usage())')
+
+        Return to normal
+
+            salvus.set_cell_postfix('')
+
+        """
+        if postfix is None:
+            return Salvus._postfix
+        else:
+            Salvus._postfix = postfix
 
     def execute(self, code, namespace=None, preparse=True, locals=None):
         if namespace is None:
             namespace = self.namespace
 
+        #code   = parsing.strip_leading_prompts(code)  # broken -- wrong on "def foo(x):\n   print x"
         blocks = parsing.divide_into_blocks(code)
 
         for start, stop, block in blocks:
@@ -409,7 +674,12 @@ class Salvus(object):
                 block = parsing.preparse_code(block)
             sys.stdout.reset(); sys.stderr.reset()
             try:
-                exec compile(block, '', 'single') in namespace, locals
+                if block.lstrip().endswith('?'):
+                    print parsing.introspect(block, namespace=namespace, preparse=False)['result']
+                else:
+                    exec compile(block+'\n', '', 'single') in namespace, locals
+                sys.stdout.flush()
+                sys.stderr.flush()
             except:
                 sys.stdout.flush()
                 sys.stderr.write('Error in lines %s-%s\n'%(start+1, stop+1))
@@ -417,12 +687,12 @@ class Salvus(object):
                 sys.stderr.flush()
                 break
 
-    def execute_with_code_decorators(self, code_decorators, code, preparse=True):
+    def execute_with_code_decorators(self, code_decorators, code, preparse=True, namespace=None, locals=None):
         """
         salvus.execute_with_code_decorators is used when evaluating
         code blocks that are set to any non-default code_decorator.
         """
-        import inspect
+        import sage  # used below as a code decorator
         if isinstance(code_decorators, (str, unicode)):
             code_decorators = [code_decorators]
 
@@ -431,6 +701,10 @@ class Salvus(object):
 
         code_decorators = [eval(code_decorator, self.namespace) for code_decorator in code_decorators]
 
+        # The code itself may want to know exactly what code decorators are in effect.
+        # For example, r.eval can do extra things when being used as a decorator.
+        self.code_decorators = code_decorators
+
         for i, code_decorator in enumerate(code_decorators):
             # eval is for backward compatibility
             if not hasattr(code_decorator, 'eval') and hasattr(code_decorator, 'before'):
@@ -438,25 +712,36 @@ class Salvus(object):
 
         for code_decorator in reversed(code_decorators):
             if hasattr(code_decorator, 'eval'):   # eval is for backward compatibility
-                code = code_decorator.eval(code, locals=self.namespace)
-                print code
+                print code_decorator.eval(code, locals=self.namespace),
                 code = ''
+            elif code_decorator is sage:
+                # special case -- the sage module (i.e., %sage) should do nothing.
+                pass
             else:
                 code = code_decorator(code)
             if code is None:
                 code = ''
 
         if code != '' and isinstance(code, (str, unicode)):
-            self.execute(code, preparse=preparse)
+            self.execute(code, preparse=preparse, namespace=namespace, locals=locals)
 
         for code_decorator in code_decorators:
             if not hasattr(code_decorator, 'eval') and hasattr(code_decorator, 'after'):
                 code_decorator.after(code)
 
     def html(self, html, done=False, once=None):
+        """
+        Display html in the output stream.
+
+        EXAMPLE:
+
+            salvus.html("<b>Hi</b>")
+        """
         self._flush_stdio()
-        self._conn.send_json(message.output(html=unicode(html), id=self._id, done=done, once=once))
-        return self
+        self._conn.send_json(message.output(html=unicode8(html), id=self._id, done=done, once=once))
+
+    def pdf(self, filename, **kwds):
+        sage_salvus.show_pdf(filename, **kwds)
 
     def tex(self, obj, display=False, done=False, once=None):
         """
@@ -475,9 +760,15 @@ class Salvus(object):
     def start_executing(self):
         self._conn.send_json(message.output(done=False, id=self._id))
 
+    def clear(self, done=False):
+        """
+        Clear the output of the current cell.
+        """
+        self._conn.send_json(message.output(clear=True, id=self._id, done=done))
+
     def stdout(self, output, done=False, once=None):
         """
-        Send the string output (or unicode(output) if output is not a
+        Send the string output (or unicode8(output) if output is not a
         string) to the standard output stream of the compute cell.
 
         INPUT:
@@ -485,13 +776,13 @@ class Salvus(object):
         - output -- string or object
 
         """
-        stdout = output if isinstance(output, (str, unicode)) else unicode(output)
+        stdout = output if isinstance(output, (str, unicode)) else unicode8(output)
         self._conn.send_json(message.output(stdout=stdout, done=done, id=self._id, once=once))
         return self
 
     def stderr(self, output, done=False, once=None):
         """
-        Send the string output (or unicode(output) if output is not a
+        Send the string output (or unicode8(output) if output is not a
         string) to the standard error stream of the compute cell.
 
         INPUT:
@@ -499,7 +790,7 @@ class Salvus(object):
         - output -- string or object
 
         """
-        stderr = output if isinstance(output, (str,unicode)) else unicode(output)
+        stderr = output if isinstance(output, (str, unicode)) else unicode8(output)
         self._conn.send_json(message.output(stderr=stderr, done=done, id=self._id, once=once))
         return self
 
@@ -518,21 +809,25 @@ class Salvus(object):
             id=self._id, done=done, once=once))
         return sage_salvus.InteractFunction(I)
 
-    def javascript(self, code, once=True, coffeescript=False, done=False, obj=None):
+    def javascript(self, code, once=False, coffeescript=False, done=False, obj=None):
         """
         Execute the given Javascript code as part of the output
         stream.  This same code will be executed (at exactly this
         point in the output stream) every time the worksheet is
         rendered.
 
+        See the docs for the top-level javascript function for more details.
+
         INPUT:
 
         - code -- a string
-        - once -- boolean (default: True); if True the Javascript is
+        - once -- boolean (default: FAlse); if True the Javascript is
           only executed once, not every time the cell is loaded. This
           is what you would use if you call salvus.stdout, etc.  Use
           once=False, e.g., if you are using javascript to make a DOM
-          element draggable (say).
+          element draggable (say).  WARNING: If once=True, then the
+          javascript is likely to get executed before other output to
+          a given cell is even rendered.
         - coffeescript -- boolean (default: False); if True, the input
           code is first converted from CoffeeScript to Javascript.
 
@@ -548,14 +843,15 @@ class Salvus(object):
         if obj is None:
             obj = {}
         self._conn.send_json(message.output(javascript={'code':code, 'coffeescript':coffeescript}, id=self._id, done=done, obj=obj, once=once))
-        return self
 
     def coffeescript(self, *args, **kwds):
         """
         This is the same as salvus.javascript, but with coffeescript=True.
+
+        See the docs for the top-level javascript function for more details.
         """
         kwds['coffeescript'] = True
-        return self.javascript(*args, **kwds)
+        self.javascript(*args, **kwds)
 
     def _check_component(self, component):
         if component not in ['input', 'output']:
@@ -582,7 +878,7 @@ class Salvus(object):
         """
         self._conn.send_json(message.output(self._id, auto=state))
 
-    def notify(self, once=None, **kwds):
+    def notify(self, **kwds):
         """
         Display a graphical notification using the pnotify Javascript library.
 
@@ -620,23 +916,28 @@ class Salvus(object):
         obj = {}
         for k, v in kwds.iteritems():
             obj[k] = sage_salvus.jsonable(v)
-        self.javascript("$.pnotify(obj)", once=once, obj=obj)
+        self.javascript("$.pnotify(obj)", once=True, obj=obj)
 
-    def execute_javascript(self, code, coffeescript=False, data=None):
+    def execute_javascript(self, code, coffeescript=False, obj=None):
         """
         Tell the browser to execute javascript.  Basically the same as
         salvus.javascript with once=True (the default), except this
-        isn't tied to a particular cell.
+        isn't tied to a particular cell.  There is a worksheet object
+        defined in the scope of the evaluation.
+
+        See the docs for the top-level javascript function for more details.
         """
-        self._conn.send_json(message.execute_javascript(code, coffeescript=coffeescript, data=data))
-        return self
+        self._conn.send_json(message.execute_javascript(code,
+            coffeescript=coffeescript, obj=json.dumps(obj,separators=(',', ':'))))
 
     def execute_coffeescript(self, *args, **kwds):
         """
         This is the same as salvus.execute_javascript, but with coffeescript=True.
+
+        See the docs for the top-level javascript function for more details.
         """
         kwds['coffeescript'] = True
-        return self.execute_javascript(*args, **kwds)
+        self.execute_javascript(*args, **kwds)
 
     def _cython(self, filename, **opts):
         """
@@ -667,7 +968,7 @@ class Salvus(object):
 
     def _import_code(self, content, **opts):
         while True:
-            py_file_base = str(uuid.uuid4()).replace('-','_')
+            py_file_base = uuid().replace('-','_')
             if not os.path.exists(py_file_base + '.py'):
                 break
         try:
@@ -710,12 +1011,30 @@ class Salvus(object):
             return self._py(filename, **opts)
         raise NotImplementedError("require file of type %s not implemented"%ext)
 
-def execute(conn, id, code, data, preparse):
-    # initialize the salvus output streams
-    salvus = Salvus(conn=conn, id=id, data=data)
+    def typeset_mode(self, on=True):
+        sage_salvus.typeset_mode(on)
+
+    def project_info(self):
+        """
+        Return a dictionary with information about the project in which this code is running.
+
+        EXAMPLES::
+
+            sage: salvus.project_info()
+            {"stdout":"{u'project_id': u'...', u'location': {u'username': u'teaAuZ9M', u'path': u'.', u'host': u'localhost', u'port': 22}, u'base_url': u'/...'}\n"}
+        """
+        return INFO
+
+
+Salvus.pdf.__func__.__doc__ = sage_salvus.show_pdf.__doc__
+
+def execute(conn, id, code, data, preparse, message_queue):
+
+    salvus = Salvus(conn=conn, id=id, data=data, message_queue=message_queue)
     salvus.start_executing()
 
     try:
+        # initialize the salvus output streams
         streams = (sys.stdout, sys.stderr)
         sys.stdout = BufferedOutputStream(salvus.stdout)
         sys.stderr = BufferedOutputStream(salvus.stderr)
@@ -725,6 +1044,13 @@ def execute(conn, id, code, data, preparse):
             namespace['sage_salvus'] = sage_salvus
         except:
             traceback.print_exc()
+
+        if salvus._prefix:
+            if not code.startswith("%"):
+                code = salvus._prefix + '\n' + code
+
+        if salvus._postfix:
+            code += '\n' + salvus._postfix
 
         salvus.execute(code, namespace=namespace, preparse=preparse)
 
@@ -762,6 +1088,43 @@ def drop_privileges(id, home, transient, username):
     import sage.misc.misc
     sage.misc.misc.DOT_SAGE = home + '/.sage/'
 
+
+class MessageQueue(list):
+    def __init__(self, conn):
+        self.queue = []
+        self.conn  = conn
+
+    def __repr__(self):
+        return "Sage Server Message Queue"
+
+    def __getitem__(self, i):
+        return self.queue[i]
+
+    def __delitem__(self, i):
+        del self.queue[i]
+
+    def next_mesg(self):
+        """
+        Remove oldest message from the queue and return it.
+        If the queue is empty, wait for a message to arrive
+        and return it (does not place it in the queue).
+        """
+        if self.queue:
+            return self.queue.pop()
+        else:
+            return self.conn.recv()
+
+    def recv(self):
+        """
+        Wait until one message is received and enqueue it.
+        Also returns the mesg.
+        """
+        mesg = self.conn.recv()
+        self.queue.insert(0,mesg)
+        return mesg
+
+
+
 def session(conn):
     """
     This is run by the child process that is forked off on each new
@@ -772,23 +1135,30 @@ def session(conn):
 
     - ``conn`` -- the TCP connection
     """
+    mq = MessageQueue(conn)
+
     pid = os.getpid()
 
     # seed the random number generator(s)
     import sage.all; sage.all.set_random_seed()
-    import time; import random; random.seed(time.time())
+    import random; random.seed(sage.all.initial_seed())
+
+    # get_memory_usage is (by ignorant design) not aware of being forked... (should post a trac ticket!)
+    import sage.misc.getusage
+    sage.misc.getusage._proc_status = "/proc/%s/status"%os.getpid()
 
     cnt = 0
     while True:
         try:
-            typ, mesg = conn.recv()
+            typ, mesg = mq.next_mesg()
+
             #print 'INFO:child%s: received message "%s"'%(pid, mesg)
             event = mesg['event']
             if event == 'terminate_session':
                 return
             elif event == 'execute_code':
                 try:
-                    execute(conn=conn, id=mesg['id'], code=mesg['code'], data=mesg.get('data',None), preparse=mesg['preparse'])
+                    execute(conn=conn, id=mesg['id'], code=mesg['code'], data=mesg.get('data',None), preparse=mesg['preparse'], message_queue=mq)
                 except:
                     pass
             elif event == 'introspect':
@@ -830,9 +1200,8 @@ def handle_session_term(signum, frame):
             return
         if not pid: return
 
-CONFPATH = os.path.join(os.environ['HOME'], '.sagemathcloud') + os.path.sep
 secret_token = None
-secret_token_path = os.path.join(CONFPATH, 'data/secret_token')
+secret_token_path = os.path.join(os.environ['SAGEMATHCLOUD'], 'data/secret_token')
 
 def unlock_conn(conn):
     global secret_token
@@ -900,6 +1269,7 @@ def serve_connection(conn):
         conn.send_json(desc)
         session(conn=conn)
 
+
 def serve(port, host):
     #log.info('opening connection on port %s', port)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -907,53 +1277,67 @@ def serve(port, host):
     s.bind((host, port))
     print 'Sage server %s:%s'%(host, port)
 
-    signal.signal(signal.SIGCHLD, handle_session_term)
+    # Enabling the following signal completely breaks subprocess pexpect in many cases, which is
+    # obviously totally unacceptable.
+    #signal.signal(signal.SIGCHLD, handle_session_term)
 
-    tm = time.time()
-    print "pre-importing the sage library..."
+    def init_library():
+        tm = time.time()
+        print "pre-importing the sage library..."
 
-    # Monkey patching interact using the new and improved Salvus
-    # implementation of interact.
-    import sagenb.notebook.interact
-    sagenb.notebook.interact.interact = sage_salvus.interact
+        # Monkey patching interact using the new and improved Salvus
+        # implementation of interact.
+        import sagenb.notebook.interact
+        sagenb.notebook.interact.interact = sage_salvus.interact
 
-    # Actually import sage now.  This must happen after the interact
-    # import because of library interacts.
-    import sage.all
+        # Actually import sage now.  This must happen after the interact
+        # import because of library interacts.
+        import sage.all
 
-    # Monkey patch the html command.
-    sage.all.html = sage.misc.html.html = sage.interacts.library.html = sage_salvus.html
+        # Monkey patch the html command.
+        sage.all.html = sage.misc.html.html = sage.interacts.library.html = sage_salvus.html
 
-    # Set a useful figsize default; the matplotlib one is not notebook friendly.
-    import sage.plot.graphics
-    sage.plot.graphics.Graphics.SHOW_OPTIONS['figsize']=[8,4]
+        # Set a useful figsize default; the matplotlib one is not notebook friendly.
+        import sage.plot.graphics
+        sage.plot.graphics.Graphics.SHOW_OPTIONS['figsize']=[8,4]
 
-    # Monkey patch latex.eval, so that %latex works in worksheets
-    sage.misc.latex.latex.eval = sage_salvus.latex0
+        # Monkey patch latex.eval, so that %latex works in worksheets
+        sage.misc.latex.latex.eval = sage_salvus.latex0
 
-    # Doing an integral start embedded ECL; unfortunately, it can
-    # easily get put in a broken state after fork that impacts future forks... ?
-    #exec "from sage.all import *; import scipy; import sympy; import pylab; from sage.calculus.predefined import x; integrate(sin(x**2),x);" in namespace
+        # Plot, integrate, etc., -- so startup time of worksheets is minimal.
 
-    exec "from sage.all import *; from sage.calculus.predefined import x; import scipy;" in namespace
-    print 'imported sage library in %s seconds'%(time.time() - tm)
+        exec "from sage.all import *; from sage.calculus.predefined import x; import scipy; import sympy; import pylab; plot(sin).save('%s/a.png'%os.environ['SAGEMATHCLOUD'], figsize=2); integrate(sin(x**2),x);" in namespace
+        print 'imported sage library in %s seconds'%(time.time() - tm)
 
-    for k,v in sage_salvus.interact_functions.iteritems():
-        namespace[k] = sagenb.notebook.interact.__dict__[k] = v
+        for k,v in sage_salvus.interact_functions.iteritems():
+            namespace[k] = sagenb.notebook.interact.__dict__[k] = v
 
-    namespace['_salvus_parsing'] = parsing
+        namespace['_salvus_parsing'] = parsing
 
-    for name in ['coffeescript', 'javascript', 'time', 'file', 'timeit', 'capture', 'cython',
-                 'script', 'python', 'python3', 'perl', 'ruby', 'sh', 'prun', 'show', 'auto',
-                 'hide', 'hideall', 'cell', 'fork', 'exercise', 'dynamic', 'var',
-                 'reset', 'restore', 'md']:
-        namespace[name] = getattr(sage_salvus, name)
+        for name in ['coffeescript', 'javascript', 'time', 'timeit', 'capture', 'cython',
+                     'script', 'python', 'python3', 'perl', 'ruby', 'sh', 'prun', 'show', 'auto',
+                     'hide', 'hideall', 'cell', 'fork', 'exercise', 'dynamic', 'var',
+                     'reset', 'restore', 'md', 'load', 'typeset_mode', 'default_mode',
+                     'sage_chat']:
+            namespace[name] = getattr(sage_salvus, name)
 
-    sage_salvus.default_namespace = dict(namespace)
+        sage_salvus.default_namespace = dict(namespace)
+
+        # Sage's pretty print is ancient and a mess.
+        namespace['pretty_print'] = sage.all.pretty_print = sage.misc.latex.pretty_print = namespace['show']
+
+        # this way client code can tell it is running as a Sage Worksheet.
+        namespace['__SAGEWS__'] = True
+
+    # Initialize sage library.
+    init_library()
 
     t = time.time()
     s.listen(128)
     i = 0
+
+    # Write to file name of port we are now listening on.
+    open(os.path.join(DATA_PATH, "sage_server.port"),'w').write(str(args.port))
     try:
         while True:
             i += 1
@@ -1001,7 +1385,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Run Sage server")
     parser.add_argument("-p", dest="port", type=int, default=0,
-                        help="port to listen on (default: 0); 0 = automatically allocated; saved to .sagemathcloud/data/sage_server.port")
+                        help="port to listen on (default: 0); 0 = automatically allocated; saved to $SAGEMATHCLOUD/data/sage_server.port")
     parser.add_argument("-l", dest='log_level', type=str, default='INFO',
                         help="log level (default: INFO) useful options include WARNING and DEBUG")
     parser.add_argument("-d", dest="daemon", default=False, action="store_const", const=True,
@@ -1037,10 +1421,9 @@ if __name__ == "__main__":
     if not args.port:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.bind(('',0)) # pick a free port
         args.port = s.getsockname()[1]
-        DATA_PATH = os.path.join(os.environ['HOME'], ".sagemathcloud/data")
+        DATA_PATH = os.path.join(os.environ['SAGEMATHCLOUD'], "data")
         if not os.path.exists(DATA_PATH):
             os.makedirs(DATA_PATH)
-        open(os.path.join(DATA_PATH, "sage_server.port"),'w').write(str(args.port))
         del s
 
     if args.portfile:

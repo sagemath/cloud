@@ -55,7 +55,13 @@ message
                               # efficiently sending and receiving
                               # non-JSON data (except channel
                               # '\u0000', which is JSON).
-                            #
+
+# hub --> client
+message
+    event         : 'session_reconnect'
+    session_uuid  : undefined   # at least one of session_uuid or data_channel must be defined
+    data_channel  : undefined
+
 
 # client <--> hub <--> local_hub
 # info = {
@@ -94,6 +100,7 @@ message
     id            : undefined
     session_uuid  : required
     data_channel  : undefined  # used for certain types of sessions
+    history       : undefined  # used for console/terminal sessions
 
 
 # sage_server&console_server --> hub
@@ -131,7 +138,7 @@ message
     reason       : undefined
     done         : undefined
 
-# browser --> hub --> sage_server
+# client --> hub --> sage_server
 message
     event        : 'execute_code'
     id           : undefined
@@ -160,6 +167,8 @@ message
     done         : false       # the sequences of messages for a given code evaluation is done.
     session_uuid : undefined   # the uuid of the session that produced this output
     once         : undefined   # if given, message is transient; it is not saved by the worksheet, etc.
+    clear        : undefined   # if true, clears all output of the current cell before rendering message.
+    events       : undefined   # {'event_name':'name of Python callable to call', ...} -- only for images right now
 
 # This message tells the client to execute the given Javascript code
 # in the browser.  (For safety, the client may choose to ignore this
@@ -173,8 +182,9 @@ message
     event        : 'execute_javascript'
     session_uuid : undefined              # set by the hub, since sage_server doesn't (need to) know the session_uuid.
     code         : required
-    data         : undefined
+    obj          : undefined
     coffeescript : false
+    cell_id      : undefined    # if set, eval scope contains an object cell that refers to the cell in the worksheet with this id.
 
 
 ############################################
@@ -228,7 +238,7 @@ message
     event        : 'codemirror_get_session'
     path         : undefined   # at least one of path or session_uuid must be defined
     session_uuid : undefined
-    project_id   : undefined
+    project_id   : required
     id           : undefined
 
 # local_hub --> hub --> client
@@ -238,7 +248,7 @@ message
     session_uuid : required
     path         : required    # absolute path
     content      : required
-    chat         : required
+    readonly     : false       # if true, the file must be treated as "read-only" by the client.
 
 # A list of edits that should be applied, along with the
 # last version of edits received before.
@@ -303,7 +313,7 @@ message
     session_uuid : required
 
 # Broadcast mesg to all clients connected to this session.
-# This is used for cursors and out-of-band chat.
+# This is used for cursors, updating session id's, etc.
 # client <--> hub <--> local_hub
 message
     event        : 'codemirror_bcast'
@@ -408,6 +418,7 @@ message
     last_name      : required      # user's last name
     email_address  : required      # address they just signed in using
     remember_me    : required      # true if sign in accomplished via remember_me cookie; otherwise, false.
+    hub            : required      # ip address (on vpn) of hub user connected to.
 
 # client --> hub
 message
@@ -513,12 +524,14 @@ exports.unrestricted_account_settings =
     email_maintenance    : required
     enable_tooltips      : required
     autosave             : required   # time in seconds or 0 to disable
-    terminal             : required   # time in seconds or 0 to disable
+    terminal             : required   # JSON object -- client interprets
+    editor_settings      : required   # JSON object -- client interprets
+    other_settings       : required   # JSON object
 
 exports.account_settings_defaults =
     plan_id            : 0  # the free trial plan
     default_system     : 'sage'
-    evaluate_key       : 'shift-enter'
+    evaluate_key       : 'Shift-Enter'
     email_new_features : true
     email_maintenance  : true
     enable_tooltips    : true
@@ -526,7 +539,25 @@ exports.account_settings_defaults =
     connect_Google     : ''
     connect_Dropbox    : ''
     autosave           : 180
-    terminal           : {font_size:14, color_scheme:'default'}
+    other_settings     :
+        confirm_close : false
+    editor_settings    :
+        strip_trailing_whitespace : true
+        line_wrapping             : true
+        line_numbers              : true
+        smart_indent              : true
+        electric_chars            : true
+        match_brackets            : true
+        first_line_number         : 1
+        indent_unit               : 4
+        tab_size                  : 4
+        bindings                  : "standard"
+        theme                     : "standard"
+        undo_depth                : 200
+    terminal           :
+        font_size    : 14
+        color_scheme : 'solarized-light'
+        font         : 'droid-sans-mono'
 
 # client <--> hub
 message(
@@ -561,7 +592,7 @@ message
 
 
 
-############################################
+#############################################
 # Scratch worksheet
 #############################################
 message
@@ -615,10 +646,12 @@ message
 #      hub --> client
 # In response, the client grabs "/cookies?id=...,set=...,get=..." via an AJAX call.
 # During that call the server can get/set HTTP-only cookies.
+# (Note that the /cookies url gets customized by base_url.)
 ######################################################################################
 message
     event       : 'cookies'
     id          : required
+    url         : "/cookies"
     set         : undefined  # name of a cookie to set
     get         : undefined  # name of a cookie to get
 
@@ -704,6 +737,24 @@ message
 
 
 
+#############################################
+#
+# Client/user browsing snapshots of a project, restoring, etc.
+#
+#############################################
+message
+    event          : 'snap'
+    id             : undefined
+    command        : required    # 'ls', 'restore', 'log', 'last', 'status'
+    project_id     : required
+    # if snapshot not given, then command must be "ls", and server returns a list of available snapshots in reverse order
+    snapshot       : undefined
+    path           : '.'         # when 'ls', returns listing of files in this path (if snapshot given), with slash
+                                 # at end of filename to denote a directory.
+    timeout        : 600         # how long to wait for response from the storage server before sending an error
+    list           : undefined   # response message is of same type, but has this filled in for 'ls' and 'log' commands.
+    timezone_offset: 0           # the difference (UTC time) - (local time), in minutes, where local time is of the client
+
 
 ######################################################################
 # Execute a program in a given project
@@ -722,6 +773,7 @@ message
     bash       : false       # if true, args are ignored and command is run as a bash command
     err_on_exit : true       # if exit code is nonzero send error return message instead of the usual output.
 
+# project --> client
 message
     event      : 'project_exec_output'
     id         : required
@@ -729,7 +781,11 @@ message
     stderr     : required
     exit_code  : required
 
-
+# client --> project
+message
+    event      : 'project_restart'
+    id         : undefined
+    project_id : required
 
 #############################################################################
 
@@ -864,17 +920,6 @@ message
     id           : required
 
 ############################################
-# Permament blob store
-############################################
-
-# Remove ttl from a blob and associate the blob with a project.
-message
-    event       : 'save_blobs_to_project'
-    id          : undefined   # message id, as usual
-    project_id  : required    # id of project that contains blob associated to
-    blob_ids    : required   # list of blobs to attach permanently to the project
-
-############################################
 # Branches
 ############################################
 # client --> hub
@@ -914,11 +959,53 @@ message
     description: required
     public     : required
 
+# client --> hub
+message
+    event      : 'delete_project'
+    id         : undefined
+    project_id : required
+
+# client --> hub
+message
+    event      : 'move_project'
+    id         : undefined
+    project_id : required
+
+message
+    event      : 'project_moved'
+    id         : undefined
+    location   : required  # new location
+
+# client --> hub
+message
+    event      : 'undelete_project'
+    id         : undefined
+    project_id : required
+
 # hub --> client
 message
     event      : 'project_created'
     id         : required
     project_id : required
+
+
+
+# Get info about a single project (instead of all projects)
+# client --> hub
+message
+    event      : 'get_project_info'
+    project_id : required
+    id         : undefined
+
+# Response to get_project_info message.
+# hub --> client
+message
+    event      : 'project_info'
+    info       : required
+    id         : undefined
+
+
+
 
 # client --> hub
 message
@@ -952,4 +1039,117 @@ message
 # hub --> client(s)
 message
     event      : 'project_list_updated'
+
+
+## linked projects  ---------------------------
+# client <--> hub
+message
+    event      : 'linked_projects'
+    id         : undefined
+    project_id : undefined
+    add        : undefined   # array of project_id's
+    remove     : undefined   # array of project_id's
+    list       : undefined   # if add/remove are undefined in client-->hub message, then list it list of project_id's in the hub-->client message
+
+
+## search ---------------------------
+
+# client --> hub
+message
+    event : 'user_search'
+    id    : undefined
+    query : required    # searches for match in first_name or last_name.
+    limit : 20          # maximum number of results requested
+
+# hub --> client
+message
+    event   : 'user_search_results'
+    id      : undefined
+    results : required  # list of {first_name:, last_name:, account_id:} objects.
+
+
+# client --> hub
+message
+    event      : 'get_project_users'
+    project_id : required
+    id         : undefined
+
+# hub --> client
+message
+    event : 'project_users'
+    id    : undefined
+    users : required   # list of {account_id:?, first_name:?, last_name:?, mode:?, state:?}
+
+message
+    event      : 'invite_collaborator'
+    id         : undefined
+    project_id : required
+    account_id : required
+
+message
+    event      : 'remove_collaborator'
+    id         : undefined
+    project_id : required
+    account_id : required
+
+message
+    event      : 'invite_noncloud_collaborators'
+    id         : undefined
+    project_id : required
+    to         : required
+    email      : required    # spam vector
+
+message
+    event      : 'invite_noncloud_collaborators_resp'
+    id         : undefined
+    mesg       : required
+
+############################################
+# Get the current server version number.
+#
+# This can be used by clients or even the local_hub to
+# force or recommend a refresh/restart.
+#
+#############################################
+# client <---> hub
+message
+    event     : 'get_version'
+    id        : undefined
+    version   : undefined    # gets filled in by the hub
+
+
+############################################
+#
+# Get various stats about cloud.sagemath.
+# The output stats object is at least has this
+#
+#   { accounts: number, projects: number, active_projects:number }
+#
+# and may have other stats.  These are cached in RAM on the
+# server for some amount of time, so might not be the
+# absolutely latest numbers.
+#
+#############################################
+# client <---> hub
+message
+    event     : 'get_stats'
+    id        : undefined
+    stats     : undefined    # gets filled in by the hub
+
+
+
+#############################################
+#
+# Message sent in response to attempt to save a blob
+# to the database.
+#
+# hub --> local_hub --> sage_server
+#
+#############################################
+message
+    event     : 'save_blob'
+    id        : undefined
+    sha1      : required     # the sha-1 hash of the blob that we just processed
+    ttl       : undefined    # ttl in seconds of the blob if saved; 0=infinite
+    error     : undefined    # if not saving, a message explaining why.
 

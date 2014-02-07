@@ -17,12 +17,10 @@ import copy, os, sys
 
 salvus = None
 
-
 import json
 from uuid import uuid4
 def uuid():
     return str(uuid4())
-
 
 ##########################################################################
 # New function interact implementation
@@ -48,7 +46,9 @@ def jsonable(x):
             return str(x)
 
 class InteractCell(object):
-    def __init__(self, f, layout=None, width=None, style=None, update_args=None, auto_update=True, flicker=False, output=True):
+    def __init__(self, f, layout=None, width=None, style=None,
+                 update_args=None, auto_update=True,
+                 flicker=False, output=True):
         """
         Given a function f, create an object that describes an interact
         for working with f interactively.
@@ -216,6 +216,12 @@ class InteractCell(object):
 class InteractFunction(object):
     def __init__(self, interact_cell):
         self.__dict__['interact_cell'] = interact_cell
+
+    def __call__(self, **kwds):
+        salvus.clear()
+        for arg, value in kwds.iteritems():
+            self.__setattr__(arg, value)
+        return self.interact_cell(kwds)
 
     def __setattr__(self, arg, value):
         I = self.__dict__['interact_cell']
@@ -544,8 +550,8 @@ def list_of_first_n(v, n):
     return w
 
 def automatic_control(default):
-    from sage.matrix.all import is_Matrix
     from sage.all import Color
+    from sage.structure.element import is_Matrix
     label = None
     default_value = None
 
@@ -741,7 +747,7 @@ def button(default=None, label=None, classes=None, width=None, icon=None):
       are 'ex'.  A string that specifies any valid HTML units (e.g., '100px', '3em')
       is also allowed [SALVUS only].
     - ``icon`` -- None or string name of any icon listed at the font
-      awesome website (http://fortawesome.github.com/Font-Awesome/), e.g., 'icon-repeat'
+      awesome website (http://fortawesome.github.com/Font-Awesome/), e.g., 'fa-repeat'
 
     EXAMPLES::
 
@@ -756,8 +762,8 @@ def button(default=None, label=None, classes=None, width=None, icon=None):
     Some buttons with icons::
 
         @interact
-        def f(n=button('repeat', icon='icon-repeat'),
-              m=button('see?', icon="icon-eye-open", classes="btn-large")):
+        def f(n=button('repeat', icon='fa-repeat'),
+              m=button('see?', icon="fa-eye", classes="btn-large")):
             print interact.changed()
     """
     return control(
@@ -827,9 +833,16 @@ class InputGrid:
             return x
 
     def from_client(self, x):
-        # x is a list of (unicode) strings -- we sage eval them all at once (instead of individually).
-        s = '[' + ','.join([str(t) for t in x]) + ']'
-        self.value = sage_eval(s)
+        if len(x) == 0:
+            self.value = []
+        elif isinstance(x[0], list):
+            self.value = [[sage_eval(t) for t in z] for z in x]
+        else:
+            # x is a list of (unicode) strings -- we sage eval them all at once (instead of individually).
+            s = '[' + ','.join([str(t) for t in x]) + ']'
+            v = sage_eval(s)
+            self.value = [v[n:n+self.ncols] for n in range(0, self.nrows*self.ncols, self.ncols)]
+
         return self.to_value(self.value) if self.to_value is not None else self.value
 
     def to_client(self, x=None):
@@ -844,6 +857,17 @@ class InputGrid:
 def input_grid(nrows, ncols, default=0, label=None, to_value=None, width=5):
     r"""
     A grid of input boxes, for use with the :func:`interact` command.
+
+    INPUT:
+
+    - ``nrows`` - an integer
+    - ``ncols`` - an integer
+    - ``default`` - an object; the default put in this input box
+    - ``label`` - a string; the label rendered to the left of the box.
+    - ``to_value`` - a list; the grid output (list of rows) is
+      sent through this function.  This may reformat the data or
+      coerce the type.
+    - ``width`` - an integer; size of each input box in characters
 
     EXAMPLES:
 
@@ -863,8 +887,8 @@ def input_grid(nrows, ncols, default=0, label=None, to_value=None, width=5):
     Squaring an editable and randomizable matrix::
 
         @interact
-        def f(reset  = button('Randomize', classes="btn-primary", icon="icon-th"),
-              square = button("Square", icon="icon-external-link"),
+        def f(reset  = button('Randomize', classes="btn-primary", icon="fa-th"),
+              square = button("Square", icon="fa-external-link"),
               m      = input_grid(4,4,default=0, width=5, label="m =", to_value=matrix)):
             if 'reset' in interact.changed():
                 print "randomize"
@@ -1116,34 +1140,167 @@ _html = sage.misc.html.HTML()
 
 class HTML:
     """
-    Cell mode that renders everything after %html as HTML.
+    Cell mode that renders everything after %html as HTML then hides
+    the input (unless you pass in hide=False).
+
+    EXAMPLES::
+
+        ---
+        %html
+        <h1>A Title</h1>
+        <h2>Subtitle</h2>
+
+        ---
+        %html(hide=False)
+        <h1>A Title</h1>
+        <h2>Subtitle</h2>
+
+        ---
+        %html("<h1>A title</h1>", hide=False)
+
+        ---
+        %html(hide=False) <h1>Title</h1>
+
     """
-    def __call__(self, s, *args, **kwds):
-        salvus.html(s, *args, **kwds)
+    def __init__(self, hide=True):
+        self._hide = hide
+
+    def __call__(self, *args, **kwds):
+        if len(kwds) > 0 and len(args) == 0:
+            return HTML(**kwds)
+        if len(args) > 0:
+            self._render(args[0], **kwds)
+
+    def _render(self, s, hide=None):
+        if hide is None:
+            hide = self._hide
+        if hide:
+            salvus.hide('input')
+        salvus.html(s)
 
     def table(self):
-        pass
+        raise NotImplementedError, "html.table not implemented in SageMathCloud yet"
 
 html = HTML()
 html.iframe = _html.iframe  # written in a way that works fine
 
-def coffeescript(s):
+def coffeescript(s=None, once=True):
     """
     Execute code using CoffeeScript.
 
+    For example:
+
+         %coffeescript console.log 'hi'
+
+    or
+
+         coffeescript("console.log 'hi'")
+
     You may either pass in a string or use this as a cell decorator,
     i.e., put %coffeescript at the top of a cell.
-    """
-    return salvus.coffeescript(s)
 
-def javascript(s):
+    If you set once=False, the code will be executed every time the output of the cell is rendered, e.g.,
+    on load, like with %auto::
+
+         coffeescript('console.log("hi")', once=False)
+
+    or
+
+         %coffeescript(once=False)
+         console.log("hi")
+
+    """
+    if s is None:
+        return lambda s : salvus.javascript(s, once=once, coffeescript=True)
+    else:
+        return salvus.javascript(s, coffeescript=True)
+
+def javascript(s=None, once=True):
     """
     Execute code using JavaScript.
 
+    For example:
+
+         %javascript console.log('hi')
+
+    or
+
+         javascript("console.log('hi')")
+
+
     You may either pass in a string or use this as a cell decorator,
     i.e., put %javascript at the top of a cell.
+
+    If you set once=False, the code will be executed every time the output of the cell is rendered, e.g.,
+    on load, like with %auto::
+
+         javascript('.. some code ', once=False)
+
+    or
+
+         %javascript(once=False)
+         ... some code
+
+    WARNING: If once=True, then this code is likely to get executed *before* the rest
+    of the output for this cell has been rendered by the client.
     """
-    return salvus.javascript(s)
+    if s is None:
+        return lambda s : salvus.javascript(s, once=once)
+    else:
+        return salvus.javascript(s)
+
+javascript_exec_doc = r"""
+
+To send code from Javascript back to the Python process to
+be executed use the worksheet.execute_code function::
+
+    %javascript  worksheet.execute_code(string_to_execute)
+
+You may also use a more general call format of the form::
+
+    %javascript
+    worksheet.execute_code({code:string_to_execute, data:jsonable_object,
+                            preparse:true or false, cb:function});
+
+The data object is available when the string_to_execute is being
+evaluated as salvus.data.  For example, if you execute this code
+in a cell::
+
+    javascript('''
+        worksheet.execute_code({code:"a = salvus.data['b']/2; print a", data:{b:5},
+                       preparse:false, cb:function(mesg) { console.log(mesg)} });
+    ''')
+
+then the Python variable a is set to 2, and the Javascript console log will display::
+
+    Object {done: false, event: "output", id: "..."}
+    Object {stdout: "2\n", done: true, event: "output", id: "..."}
+
+You can also send an interrupt signal to the Python process from
+Javascript by calling worksheet.interrupt(), and kill the process
+with worksheet.kill().  For example, here the a=4 never
+happens (but a=2 does)::
+
+    %javascript
+    worksheet.execute_code({code:'a=2; sleep(100); a=4;',
+                            cb:function(mesg) { worksheet.interrupt(); console.log(mesg)}})
+
+or using CoffeeScript (a Javascript preparser)::
+
+    %coffeescript
+    worksheet.execute_code
+        code : 'a=2; sleep(100); a=4;'
+        cb   : (mesg) ->
+            worksheet.interrupt()
+            console.log(mesg)
+
+The Javascript code is evaluated with numerous standard Javascript libraries available,
+including jQuery, Twitter Bootstrap, jQueryUI, etc.
+
+"""
+
+for s in [coffeescript, javascript]:
+    s.__doc__ += javascript_exec_doc
 
 def latex0(s=None, **kwds):
     """
@@ -1407,7 +1564,7 @@ def cython(code=None, **kwds):
             html_filename = os.path.join(path, n)
     if html_filename is not None:
         html_url = salvus.file(html_filename, show=False)
-        salvus.html("<a href='%s' target='_new' class='btn btn-small '>Show auto-generated code &nbsp;<i class='icon-external-link'></i></a>"%html_url)
+        salvus.html("<a href='%s' target='_new' class='btn btn-small '>Show auto-generated code &nbsp;<i class='fa fa-external-link'></i></a>"%html_url)
 
 cython.__doc__ += sage.misc.cython.cython.__doc__
 
@@ -1599,6 +1756,54 @@ def sh(code):
     """
     return script('/bin/bash')(code)
 
+# Monkey patch the R interpreter interface to support graphics, when
+# used as a decorator.
+
+import sage.interfaces.r
+def r_eval0(*args, **kwds):
+    return sage.interfaces.r.R.eval(sage.interfaces.r.r, *args, **kwds).strip()
+
+r_dev_on = False
+def r_eval(code, *args, **kwds):
+    """
+    Run a block of R code.
+
+    EXAMPLES::
+
+         sage: print r.eval("summary(c(1,2,3,111,2,3,2,3,2,5,4))")   # outputs a string
+         Min. 1st Qu.  Median    Mean 3rd Qu.    Max.
+         1.00    2.00    3.00   12.55    3.50  111.00
+
+    In the notebook, you can put %r at the top of a cell, or type "%default_mode r" into
+    a cell to set the whole worksheet to r mode.
+
+    NOTE: Any plots drawn using the plot command should "just work", without having
+    to mess with special devices, etc.
+    """
+    # Only use special graphics support when using r as a cell decorator, since it has
+    # a 10ms penalty (factor of 10 slowdown) -- which doesn't matter for interactive work, but matters
+    # a lot if one had a loop with r.eval in it.
+    if sage.interfaces.r.r not in salvus.code_decorators:
+        return r_eval0(code, *args, **kwds)
+
+    global r_dev_on
+    if r_dev_on:
+        return r_eval0(code, *args, **kwds)
+    try:
+        r_dev_on = True
+        tmp = '/tmp/' + uuid() + '.png'
+        r_eval0("png(filename='%s')"%tmp)
+        s = r_eval0(code, *args, **kwds)
+        r_eval0('dev.off()')
+        return s
+    finally:
+        r_dev_on = False
+        if os.path.exists(tmp):
+            salvus.stdout('\n'); salvus.file(tmp, show=True); salvus.stdout('\n')
+            os.unlink(tmp)
+
+sage.interfaces.r.r.eval = r_eval
+
 
 def prun(code):
     """
@@ -1785,38 +1990,96 @@ fork = Fork()
 
 
 ####################################################
-# Display of 2d graphics objects
+# Display of 2d/3d graphics objects
 ####################################################
 
 from sage.misc.all import tmp_filename
+from sage.plot.animate import Animation
+import matplotlib.figure
 
-def show_2d_plot(obj, svg, **kwds):
-    t = tmp_filename(ext = '.svg' if svg else '.png')
-    obj.save(t, **kwds)
+def show_animation(obj, **kwds):
+    t = tmp_filename(ext='.gif')
+    obj.gif(savefile=t, **kwds)
     salvus.file(t)
+    os.unlink(t)
 
-def show_3d_plot(obj, **kwds):
+def show_2d_plot_using_matplotlib(obj, svg, **kwds):
+    if 'events' in kwds:
+        from graphics import InteractiveGraphics
+        ig = InteractiveGraphics(obj, **kwds['events'])
+        n = '__a'+uuid().replace('-','')  # so it doesn't get garbage collected instantly.
+        obj.__setattr__(n, ig)
+        kwds2 = dict(kwds)
+        del kwds2['events']
+        ig.show(**kwds2)
+    else:
+        t = tmp_filename(ext = '.svg' if svg else '.png')
+        if isinstance(obj, matplotlib.figure.Figure):
+            obj.savefig(t, **kwds)
+        else:
+            obj.save(t, **kwds)
+        salvus.file(t)
+        os.unlink(t)
+
+def show_3d_plot_using_tachyon(obj, **kwds):
     t = tmp_filename(ext = '.png')
     obj.save(t, **kwds)
     salvus.file(t)
+    os.unlink(t)
 
 from sage.plot.graphics import Graphics, GraphicsArray
 from sage.plot.plot3d.base import Graphics3d
 
 def show(obj, svg=False, **kwds):
     """
-    Show an expression, typeset nicely in tex, or a 2d or 3d graphics object.
+    Show a 2d or 3d graphics object, animation, or matplotlib figure, or show an
+    expression typeset nicely using LaTeX.
 
-       - svg: (default False); if true, render graphics using svg.  This is False by default,
+       - display: (default: True); if true use display math for expression (big and centered).
+
+       - svg: (default False); if True, render graphics using svg.  This is False by default,
          since at least Google Chrome mis-renders this as empty:
               line([(10, 0), (10, 15)], color='black').show(svg=True)
 
-       - display: (default: True); if true use display math for expression (big and centered).
+       - events: if given, {'click':foo, 'mousemove':bar}; each time the user clicks,
+         the function foo is called with a 2-tuple (x,y) where they clicked.  Similarly
+         for mousemove.  This works for Sage 2d graphics and matplotlib figures.
+
+    For animations, there are two options::
+
+       - ``delay`` - (default: 20) delay in hundredths of a second between frames
+
+       - ``iterations`` - integer (default: 0); number of iterations of animation. If 0, loop forever.
+
+
+    EXAMPLES:
+
+    Here's an example that illustrates creating a clickable image with events::
+
+        @interact
+        def f0(fun=x*sin(x^2), mousemove='', click='(0,0)'):
+            click = sage_eval(click)
+            g = plot(fun, (x,0,5), zorder=0) + point(click, color='red', pointsize=100, zorder=10)
+            ymax = g.ymax(); ymin = g.ymin()
+            m = fun.derivative(x)(x=click[0])
+            b =  fun(x=click[0]) - m*click[0]
+            g += plot(m*x + b, (click[0]-1,click[0]+1), color='red', zorder=10)
+            def h(p):
+                f0.mousemove = p
+            def c(p):
+                f0(click=p)
+            show(g, events={'click':c, 'mousemove':h}, svg=True, gridlines='major', ymin=ymin, ymax=ymax)
     """
-    if isinstance(obj, (Graphics, GraphicsArray)):
-        show_2d_plot(obj, svg=svg, **kwds)
+    import graphics
+    if isinstance(obj, (Graphics, GraphicsArray, matplotlib.figure.Figure)):
+        show_2d_plot_using_matplotlib(obj, svg=svg, **kwds)
+    elif isinstance(obj, Animation):
+        show_animation(obj, **kwds)
     elif isinstance(obj, Graphics3d):
-        show_3d_plot(obj, **kwds)
+        if kwds.get('viewer') == 'tachyon':
+            show_3d_plot_using_tachyon(obj, **kwds)
+        else:
+            graphics.show_3d_plot_using_threejs(obj, **kwds)
     else:
         if 'display' not in kwds:
             kwds['display'] = True
@@ -1824,6 +2087,8 @@ def show(obj, svg=False, **kwds):
 
 # Make it so plots plot themselves correctly when they call their repr.
 Graphics.show = show
+GraphicsArray.show = show
+Animation.show = show
 
 ###################################################
 # %auto -- automatically evaluate a cell on load
@@ -2057,7 +2322,7 @@ def exercise(code):
 
     the_times = []
     @interact(layout=[[('go',1), ('title',11,'')],[('')], [('times',12, "<b>Times:</b>")]], flicker=True)
-    def h(go    = button("&nbsp;"*5 + "Go" + "&nbsp;"*7, label='', icon='icon-refresh', classes="btn-large btn-success"),
+    def h(go    = button("&nbsp;"*5 + "Go" + "&nbsp;"*7, label='', icon='fa-refresh', classes="btn-large btn-success"),
           title = title_control(title),
           times = text_control('')):
         c = interact.changed()
@@ -2254,9 +2519,31 @@ def md2html(s):
 
     return markedDownText
 
-def md(s):
+class Markdown(object):
     r"""
-    Cell mode that renders everything after %md as markdown.
+    Cell mode that renders everything after %md as markdown and hides the input by default.
+
+    EXAMPLES::
+
+        ---
+        %md
+        # A Title
+
+        ## A subheading
+
+        ---
+        %md(hide=False)
+        # A title
+
+        - a list
+
+        ---
+        md("# A title", hide=False)
+
+
+        ---
+        %md(hide=False) `some code`
+
 
     This uses the Python markdown2 library with the following
     extras enabled:
@@ -2269,7 +2556,311 @@ def md(s):
     typeset if it is wrapped in $'s and $$'s, \(, \), \[, \],
     \begin{equation}, \end{equation}, \begin{align}, \end{align}.,
     """
-    html(md2html(s))
+    def __init__(self, hide=True):
+        self._hide = hide
+
+    def __call__(self, *args, **kwds):
+        if len(kwds) > 0 and len(args) == 0:
+            return Markdown(**kwds)
+        if len(args) > 0:
+            self._render(args[0], **kwds)
+
+    def _render(self, s, hide=None):
+        if hide is None:
+            hide = self._hide
+        html(md2html(s),hide=hide)
+
+md = Markdown()
 
 
+def load_html_resource(filename):
+    fl = filename.lower()
+    if fl.startswith('http://') or fl.startswith('https://'):
+        # remote url
+        url = fl
+    else:
+        # local file
+        url = salvus.file(filename, show=False)
+    ext = os.path.splitext(filename)[1][1:].lower()
+    if ext == "css":
+        salvus.javascript('''$.get("%s", function(css) { $('<style type=text/css></style>').html(css).appendTo("body")});'''%url)
+    elif ext == "html":
+        # TODO: opts.element should change to cell.element when more canonical (need to finish some code in syncdoc)!
+        salvus.javascript('opts.element.append($("<div>").load("%s"))'%url)
+    elif ext == "coffee":
+        salvus.javascript('$.ajax({url:"%s"}).done(function(data) { eval(CoffeeScript.compile(data)); })'%url)
+    elif ext == "js":
+        salvus.html('<script src="%s"></script>'%url)
+
+# Monkey-patched the load command
+def load(*args, **kwds):
+    """
+    Load Sage object from the file with name filename, which will have
+    an .sobj extension added if it doesn't have one.  Or, if the input
+    is a filename ending in .py, .pyx, or .sage, load that file into
+    the current running session.  Loaded files are not loaded into
+    their own namespace, i.e., this is much more like Python's
+    "execfile" than Python's "import".
+
+    You may also load an sobj or execute a code file available on the web
+    by specifying the full URL to the file.  (Set ``verbose = False`` to
+    supress the download progress indicator.)
+
+    INPUT:
+
+        - args -- any number of filename strings with any of the following extensions:
+
+             .sobj, .sage, .py, .pyx, .html, .css, .js, .coffee, .pdf
+
+        - ``verbose`` -- (default: True) load file over the network.
+
+    If you load and of the web types (.html, .css, .js, .coffee), they are loaded
+    into the web browser DOM (or Javascript session), not the Python process.
+
+    If you load a pdf, it is displayed in the output of the worksheet.  The extra
+    options are passed to salvus.pdf -- see the docstring for that.
+
+    In SageMathCloud you may also use load as a decorator, with filename separated
+    by whitespace or commas::
+
+        %load foo.sage  bar.py  a.pyx, b.pyx
+
+    The following are all valid ways to use load::
+
+        %load a.html
+        %load a.css
+        %load a.js
+        %load a.coffee
+        %load a.css a.js a.coffee a.html
+        load('a.css', 'a.js', 'a.coffee', 'a.html')
+        load('a.css a.js a.coffee a.html')
+        load(['a.css', 'a.js', 'a.coffee', 'a.html'])
+    """
+    if len(args) == 1:
+        if isinstance(args[0], (unicode,str)):
+            args = tuple(args[0].replace(',',' ').split())
+        if isinstance(args[0], (list, tuple)):
+            args = args[0]
+
+    if len(args) == 0 and len(kwds) == 1:
+        # This supports
+        #   %load(verbose=False)  a.sage
+        # which doesn't really matter right now, since there is a bug in Sage's own
+        # load command, where it isn't verbose for network code, but is for objects.
+        def f(*args):
+            return load(*args, **kwds)
+        return f
+
+    t = '__tmp__'; i=0
+    while t+str(i) in salvus.namespace:
+        i += 1
+    t += str(i)
+
+    # First handle HTML related args -- these are all very oriented toward cloud.sagemath worksheets
+    html_extensions = set(['js','css','coffee','html'])
+    other_args = []
+    for arg in args:
+        i = arg.rfind('.')
+        if i != -1 and arg[i+1:].lower() in html_extensions:
+            load_html_resource(arg)
+        elif i != -1 and arg[i+1:].lower() == 'pdf':
+            show_pdf(arg, **kwds)
+        else:
+            other_args.append(arg)
+
+    # pdf?
+    for arg in args:
+        i = arg.find('.')
+
+    # now handle remaining non-web arguments.
+    if len(other_args) > 0:
+        try:
+            exec 'salvus.namespace["%s"] = sage.structure.sage_object.load(*__args, **__kwds)'%t in salvus.namespace, {'__args':other_args, '__kwds':kwds}
+            return salvus.namespace[t]
+        finally:
+            try:
+                del salvus.namespace[t]
+            except: pass
+
+
+
+## Make it so pylab (matplotlib) figures display, at least using pylab.show
+import pylab
+def _show_pylab():
+    try:
+        filename = uuid()+'.png'
+        pylab.savefig(filename)
+        salvus.file(filename)
+    finally:
+        try:
+            os.unlink(filename)
+        except:
+            pass
+
+pylab.show = _show_pylab
+matplotlib.figure.Figure.show = show
+
+import matplotlib.pyplot
+def _show_pyplot():
+    try:
+        filename = uuid()+'.png'
+        matplotlib.pyplot.savefig(filename)
+        salvus.file(filename)
+    finally:
+        try:
+            os.unlink(filename)
+        except:
+            pass
+matplotlib.pyplot.show = _show_pyplot
+
+
+## Our own displayhook
+
+_system_sys_displayhook = sys.displayhook
+
+def displayhook(obj):
+    if isinstance(obj, (Graphics3d, Graphics, GraphicsArray, matplotlib.figure.Figure, Animation)):
+        show(obj)
+    else:
+        _system_sys_displayhook(obj)
+
+sys.displayhook = displayhook
+import sage.misc.latex, types
+# We make this a list so that users can append to it easily.
+TYPESET_MODE_EXCLUDES = [sage.misc.latex.LatexExpr, types.NoneType,
+                         type, sage.plot.plot3d.base.Graphics3d,
+                         sage.plot.graphics.Graphics,
+                         sage.plot.graphics.GraphicsArray]
+
+def typeset_mode(on=True, display=True, **args):
+    """
+    Turn typeset mode on or off.  When on, each output is typeset using LaTeX.
+
+    EXAMPLES::
+
+         typeset_mode()  # turns typesetting on
+
+         typeset_mode(False)  # turn typesetting off
+
+         typeset_mode(True, display=False) # typesetting mode on, but do not make output big and centered
+
+    """
+    if on:
+        def f(obj):
+            if isinstance(obj, tuple(TYPESET_MODE_EXCLUDES)):
+                displayhook(obj)
+            else:
+                salvus.tex(obj, display=display)
+        sys.displayhook = f
+    else:
+        sys.displayhook = displayhook
+
+def default_mode(mode):
+    """
+    Set the default mode for cell evaluation.  This is equivalent
+    to putting %mode at the top of any cell that does not start
+    with %.   Use default_mode() to return the current mode.
+    Use default_mode("") to have no default mode.
+
+    EXAMPLES::
+
+    Make Pari/GP the default mode:
+
+        default_mode("gp")
+        default_mode()   # outputs "gp"
+
+    Then switch back to Sage::
+
+        default_mode("")   # or default_mode("sage")
+
+    You can also use default_mode as a line decorator::
+
+        %default_mode gp   # equivalent to default_mode("gp")
+    """
+    return salvus.default_mode(mode)
+
+
+
+
+
+
+#######################################################
+# Monkey patching and deprecation --
+#######################################################
+
+# Monkey patch around a bug in Python's findsource that breaks deprecation in cloud worksheets.
+# This won't matter if we switch to not using exec, since then there will be a file behind
+# each block of code.  However, for now we have to do this.
+import inspect
+_findsource = inspect.findsource
+def findsource(object):
+    try: return _findsource(object)
+    except: raise IOError('source code not available')  # as *claimed* by the Python docs!
+inspect.findsource = findsource
+
+
+
+#######################################################
+# Viewing pdf's
+#######################################################
+
+def show_pdf(filename, viewer="object", width=1000, height=600, scale=1.6):
+    """
+    Display a PDF file from the filesystem in an output cell of a worksheet.
+
+    INPUT:
+
+    - filename
+    - viewer -- 'object' (default): use html object tag, which uses the browser plugin, or
+                provides a download link in case the browser can't display pdf's.
+              -- 'pdfjs' (experimental):  use the pdf.js pure HTML5 viewer, which doesn't require any plugins
+                (this works on more browser, but may be slower and uglier)
+    - width -- (default: 1000) -- pixel width of viewer
+    - height -- (default: 600) -- pixel height of viewer
+    - scale  -- (default: 1.6) -- zoom scale (only applies to pdfjs)
+    """
+    url = salvus.file(filename, show=False)
+    if viewer == 'object':
+        s = '<object data="%s"  type="application/pdf" width="%s" height="%s"> Your browser doesn\'t support embedded PDF\'s, but you can <a href="%s">download %s</a></p> </object>'%(url, width, height, url, filename)
+        salvus.html(s)
+    elif viewer == 'pdfjs':
+        import uuid
+        id = 'a'+str(uuid())
+        salvus.html('<div id="%s" style="background-color:white; width:%spx; height:%spx; cursor:pointer; overflow:auto;"></div>'%(id, width, height))
+        salvus.html("""
+    <!-- pdf.js-based embedded javascript PDF viewer -->
+    <!-- File from the PDF.JS Library -->
+    <script type="text/javascript" src="pdfListView/external/compatibility.js"></script>
+    <script type="text/javascript" src="pdfListView/external/pdf.js"></script>
+
+    <!-- to disable webworkers: swap these below -->
+    <!-- <script type="text/javascript">PDFJS.disableWorker = true;</script> -->
+    <script type="text/javascript">PDFJS.workerSrc = 'pdfListView/external/pdf.js';</script>
+
+    <link rel="stylesheet" href="pdfListView/src/TextLayer.css">
+    <script src="pdfListView/src/TextLayerBuilder.js"></script>
+    <link rel="stylesheet" href="pdfListView/src/AnnotationsLayer.css">
+    <script src="pdfListView/src/AnnotationsLayerBuilder.js"></script>
+    <script src="pdfListView/src/PdfListView.js"></script>
+    """)
+
+        salvus.javascript('''
+            var lv = new PDFListView($("#%s")[0], {textLayerBuilder:TextLayerBuilder, annotationsLayerBuilder: AnnotationsLayerBuilder});
+            lv.setScale(%s);
+            lv.loadPdf("%s")'''%(
+            id, scale, url))
+    else:
+        raise RuntimeError("viewer must be 'object' or 'pdfjs'")
+
+
+########################################################
+# WebRTC Support
+########################################################
+def sage_chat(chatroom=None, height="258px"):
+    if chatroom is None:
+        from random import randint
+        chatroom = randint(0,1e24)
+    html("""
+    <iframe src="/static/webrtc/index.html?%s" height="%s" width="100%%"></iframe>
+    """%(chatroom, height), hide=False)
 

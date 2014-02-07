@@ -82,15 +82,15 @@ class DiffSync
 
     # "Best effort" application of array of edits.
     _apply_edits: (edits, doc, cb) =>
-        cb(false, dmp.patch_apply(edits, doc)[0])
+        cb?(false, dmp.patch_apply(edits, doc)[0])
 
     _apply_edits_to_live: (edits, cb) =>
         @_apply_edits  edits, @live, (err, result) =>
             if err
-                cb(err); return
+                cb?(err); return
             else
                 @live = result
-                cb()
+                cb?()
 
     # Return a checksum of a document
     _checksum: (doc) =>
@@ -127,7 +127,10 @@ class DiffSync
                 cb(err); return
 
             if not snapshot?
-                cb("snapshot computed in push_edits is undefined")
+                cb("snapshot computed in push_edits is undefined"); return
+
+            if not @remote?
+                cb("@remote in push_edits is undefined"); return
 
             edits = {edits:@_compute_edits(@shadow, snapshot)}
 
@@ -232,19 +235,19 @@ class CustomDiffSync extends DiffSync
         return @opts.diff(version0, version1)
 
     _apply_edits: (edits, doc, cb) =>
-        cb(false, @opts.patch(edits, doc))
+        cb?(false, @opts.patch(edits, doc))
 
     _apply_edits_to_live: (edits, cb) =>
         if @opts.patch_in_place?
             @opts.patch_in_place(edits, @live)
-            cb()
+            cb?()
         else
             @_apply_edits  edits, @live, (err, result) =>
                 if err
-                    cb(err); return
+                    cb?(err); return
                 else
                     @live = result
-                    cb()
+                    cb?()
 
     _checksum: (doc) =>
         return @opts.checksum(doc)
@@ -544,19 +547,54 @@ exports.test7 = (n=1) ->
 
 exports.DiffSync = DiffSync
 
-# For various clients:
+#---------------------------------------------------------------------------------------------------------
+# Support for using synchronized docs to represent Sage Worksheets (i.e., live compute documents)
+#---------------------------------------------------------------------------------------------------------
 
 exports.MARKERS =
     cell   : "\uFE20"
     output : "\uFE21"
 
-exports.FLAGS =
+exports.FLAGS = FLAGS =
     execute     : "x"   # request that cell be executed
+    waiting     : "w"   # request to execute received, but still not running (because of another cell running)
     running     : "r"   # cell currently running
     interrupt   : "c"   # request execution of cell be interrupted
     hide_input  : "i"   # hide input part of cell
     hide_output : "o"   # hide output part of cell
     auto        : "a"   # if set, run the cell when the sage session first starts
+
+exports.ACTION_FLAGS = [FLAGS.execute, FLAGS.running, FLAGS.waiting, FLAGS.interrupt]
+
+# Return a list of the uuids of files that are displayed in the given document,
+# where doc is the string representation of a worksheet.
+# At present, this function finds all output messages of the form
+#   {"file":{"uuid":"806f4f54-96c8-47f0-9af3-74b5d48d0a70",...}}
+# but it could do more at some point in the future.
+
+exports.uuids_of_linked_files = (doc) ->
+    uuids = []
+    i = 0
+    while true
+        i = doc.indexOf(exports.MARKERS.output, i)
+        if i == -1
+            return uuids
+        j = doc.indexOf('\n', i)
+        if j == -1
+            j = doc.length
+        line = doc.slice(i, j)
+        for m in line.split(exports.MARKERS.output).slice(1)
+            # Only bother to run the possibly slow JSON.parse on file messages; since
+            # this function would block the global hub server, this is important.
+            if m.slice(0,8) == '{"file":'
+                mesg = JSON.parse(m)
+                uuid = mesg.file?.uuid
+                if uuid?
+                    uuids.push(uuid)
+        i = j
+
+
+
 
 
 

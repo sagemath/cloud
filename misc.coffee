@@ -4,6 +4,35 @@
 #
 ##########################################################################
 #
+###############################################################################
+# Copyright (c) 2013, William Stein
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+# ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+###############################################################################
+
+
+# true if s.startswith(c)
+exports.startswith = (s, c) ->
+    return s.indexOf(c) == 0
 
 exports.merge = (dest, objs ...) ->
     for obj in objs
@@ -13,8 +42,17 @@ exports.merge = (dest, objs ...) ->
 # Return a random element of an array
 exports.random_choice = (array) -> array[Math.floor(Math.random() * array.length)]
 
+# Given an object map {foo:bar, ...} returns an array [foo, bar] randomly
+# chosen from the object map.
+exports.random_choice_from_obj = (obj) ->
+    k = exports.random_choice(exports.keys(obj))
+    return [k, obj[k]]
+
 # Returns a random integer in the range, inclusive (like in Python)
 exports.randint = (lower, upper) -> Math.floor(Math.random()*(upper - lower + 1)) + lower
+
+# Like Python's string split -- splits on whitespace
+exports.split = (s) -> s.match(/\S+/g)
 
 # modifies target in place, so that the properties of target are the
 # same as those of upper_bound, and each is <=.
@@ -31,6 +69,8 @@ exports.min_object = (target, upper_bounds) ->
 # corresponding value obj1[P] is set (all in a new copy of obj1) to
 # be obj2[P].
 exports.defaults = (obj1, obj2) ->
+    if not obj1?
+        obj1 = {}
     error  = () ->
         try
             "(obj1=#{exports.to_json(obj1)}, obj2=#{exports.to_json(obj2)})"
@@ -43,7 +83,7 @@ exports.defaults = (obj1, obj2) ->
         throw "misc.defaults -- TypeError: function takes inputs as an object #{error()}"
     r = {}
     for prop, val of obj2
-        if obj1.hasOwnProperty(prop)
+        if obj1.hasOwnProperty(prop) and obj1[prop]?
             if obj2[prop] == exports.defaults.required and not obj1[prop]?
                 console.trace()
                 throw "misc.defaults -- TypeError: property '#{prop}' must be specified: #{error()}"
@@ -61,7 +101,7 @@ exports.defaults = (obj1, obj2) ->
     return r
 
 # WARNING -- don't accidentally use this as a default:
-exports.defaults.required = "__!!!!!!this is a required property!!!!!!__"
+exports.required = exports.defaults.required = "__!!!!!!this is a required property!!!!!!__"
 
 # Current time in milliseconds since epoch
 exports.mswalltime = (t) ->
@@ -122,17 +162,32 @@ exports.from_json = (x) ->
         console.log("from_json: error parsing #{x} (=#{exports.to_json(x)}) from JSON")
         throw err
 
-# converts a Date object to an ISO string
+# converts a Date object to an ISO string in UTC.
+# NOTE -- we remove the +0000 (or whatever) timezone offset, since *all* machines within
+# the SMC servers are assumed to be on UTC.
 exports.to_iso = (d) -> (new Date(d - d.getTimezoneOffset()*60*1000)).toISOString().slice(0,-5)
 
 # returns true if the given object has no keys
 exports.is_empty_object = (obj) -> Object.keys(obj).length == 0
 
 # returns the number of keys of an object, e.g., {a:5, b:7, d:'hello'} --> 3
-exports.len = (obj) -> Object.keys(obj).length
+exports.len = (obj) ->
+    a = obj.length
+    if a?
+        return a
+    Object.keys(obj).length
 
 # return the keys of an object, e.g., {a:5, xyz:'10'} -> ['a', 'xyz']
 exports.keys = (obj) -> (key for key of obj)
+
+# remove first occurrence of value (just like in python);
+# throws an exception if val not in list.
+exports.remove = (obj, val) ->
+    for i in [0...obj.length]
+        if obj[i] == val
+            obj.splice(i, 1)
+            return
+    throw "ValueError -- item not in array"
 
 # convert an array of 2-element arrays to an object, e.g., [['a',5], ['xyz','10']] --> {a:5, xyz:'10'}
 exports.pairs_to_obj = (v) ->
@@ -165,7 +220,13 @@ exports.max = (array) -> (array.reduce((a,b) -> Math.max(a, b)))
 exports.min = (array) -> (array.reduce((a,b) -> Math.min(a, b)))
 
 filename_extension_re = /(?:\.([^.]+))?$/
-exports.filename_extension = (filename) -> filename_extension_re.exec(filename)[1]
+exports.filename_extension = (filename) ->
+    ext = filename_extension_re.exec(filename)[1]
+    if ext?
+        return ext
+    else
+        return ''
+
 
 exports.copy = (obj) ->
     r = {}
@@ -204,6 +265,14 @@ exports.path_split = (path) ->
     return {head:v.slice(0,-1).join('/'), tail:v[v.length-1]}
 
 
+
+exports.meta_file = (path, ext) ->
+    p = exports.path_split(path)
+    path = p.head
+    if p.head != ''
+        path += '/'
+    return path + "." + p.tail + ".sage-" + ext
+
 exports.trunc = (s, max_length) ->
     if not s?
         return s
@@ -215,6 +284,19 @@ exports.trunc = (s, max_length) ->
         return s
 
 exports.git_author = (first_name, last_name, email_address) -> "#{first_name} #{last_name} <#{email_address}>"
+
+# More canonical email address -- lower case and remove stuff between + and @.
+# This is mainly used for banning users.
+
+exports.canonicalize_email_address = (email_address) ->
+    # remove + part from email address:   foo+bar@example.com
+    i = email_address.indexOf('+')
+    if i != -1
+        j = email_address.indexOf('@')
+        if j != -1
+            email_address = email_address.slice(0,i) + email_address.slice(j)
+    # make email address lower case
+    return email_address.toLowerCase()
 
 # Delete trailing whitespace in the string s.  See
 exports.delete_trailing_whitespace = (s) ->
@@ -241,6 +323,115 @@ exports.retry_until_success = (opts) ->
             else
                 opts.cb?()
     setTimeout(g, delta)
+
+
+# Attempt (using exponential backoff) to execute the given function.
+# Will keep retrying until it succeeds, then call "cb()".   You may
+# call this multiple times and all callbacks will get called once the
+# connection succeeds, since it keeps a stack of all cb's.
+# The function f that gets called should make one attempt to do what it
+# does, then on success do cb() and on failure cb(err).
+# It must *NOT* call the RetryUntilSuccess callable object.
+#
+# Usage
+#
+#      @foo = retry_until_success_wrapper(f:@_foo)
+#      @bar = retry_until_success_wrapper(f:@_foo, start_delay:100, max_delay:10000, exp_factor:1.5)
+#
+exports.retry_until_success_wrapper = (opts) ->
+    _X = new RetryUntilSuccess(opts)
+    return (cb) -> _X.call(cb)
+
+class RetryUntilSuccess
+    constructor: (opts) ->
+        @opts = exports.defaults opts,
+            f            : exports.defaults.required    # f(cb);  cb(err)
+            start_delay  : 100         # initial delay beforing calling f again.  times are all in milliseconds
+            max_delay    : 20000
+            exp_factor   : 1.4
+            max_tries    : undefined
+            min_interval : 100   # if defined, all calls to f will be separated by *at least* this amount of time (to avoid overloading services, etc.)
+            logname      : undefined
+        if @opts.min_interval?
+            if @opts.start_delay < @opts.min_interval
+                @opts.start_delay = @opts.min_interval
+        @f = @opts.f
+
+    call: (cb, retry_delay) =>
+        if @opts.logname?
+            console.log("#{@opts.logname}(... #{retry_delay})")
+
+        if not @_cb_stack?
+            @_cb_stack = []
+        if cb?
+            @_cb_stack.push(cb)
+        if @_calling
+            return
+        @_calling = true
+        if not retry_delay?
+            @attempts = 0
+
+        if @opts.logname?
+            console.log("actually calling -- #{@opts.logname}(... #{retry_delay})")
+
+        g = () =>
+            if @opts.min_interval?
+                @_last_call_time = exports.mswalltime()
+            @f (err) =>
+                @attempts += 1
+                @_calling = false
+                if err? and err
+                    if @opts.max_tries? and @attempts >= @opts.max_tries
+                        while @_cb_stack.length > 0
+                            @_cb_stack.pop()(err)
+                        return
+                    if not retry_delay?
+                        retry_delay = @opts.start_delay
+                    else
+                        retry_delay = Math.min(@opts.max_delay, @opts.exp_factor*retry_delay)
+                    f = () =>
+                        @call(undefined, retry_delay)
+                    setTimeout(f, retry_delay)
+                else
+                    while @_cb_stack.length > 0
+                        @_cb_stack.pop()()
+        if not @_last_call_time? or not @opts.min_interval?
+            g()
+        else
+            w = exports.mswalltime(@_last_call_time)
+            if w < @opts.min_interval
+                setTimeout(g, @opts.min_interval - w)
+            else
+                g()
+
+# WARNING: params below have different semantics than above; these are what *really* make sense....
+exports.eval_until_defined = (opts) ->
+    opts = exports.defaults opts,
+        code         : exports.required
+        start_delay  : 100    # initial delay beforing calling f again.  times are all in milliseconds
+        max_time     : 10000  # error if total time spent trying will exceed this time
+        exp_factor   : 1.4
+        cb           : exports.required # cb(err, eval(code))
+    delay = undefined
+    total = 0
+    f = () ->
+        result = eval(opts.code)
+        if result?
+            opts.cb(false, result)
+        else
+            if not delay?
+                delay = opts.start_delay
+            else
+                delay *= opts.exp_factor
+            total += delay
+            if total > opts.max_time
+                opts.cb("failed to eval code within #{opts.max_time}")
+            else
+                setTimeout(f, delay)
+    f()
+
+
+
 
 # Class to use for mapping a collection of strings to characters (e.g., for use with diff/patch/match).
 class exports.StringCharMapping
@@ -291,4 +482,43 @@ exports.uniquify_string = (s) ->
             t += c
             seen_already[c] = true
     return t
+
+
+# Return string t=s+'\n'*k so that t ends in at least n newlines.
+# Returns s itself (so no copy made) if s already ends in n newlines (a common case).
+### -- not used
+exports.ensure_string_ends_in_newlines = (s, n) ->
+    j = s.length-1
+    while j >= 0 and j >= s.length-n and s[j] == '\n'
+        j -= 1
+    # Now either j = -1 or s[j] is not a newline (and it is the first character not a newline from the right).
+    console.log(j)
+    k = n - (s.length - (j + 1))
+    console.log(k)
+    if k == 0
+        return s
+    else
+        return s + Array(k+1).join('\n')   # see http://stackoverflow.com/questions/1877475/repeat-character-n-times
+###
+
+
+
+
+# Used in the database, etc., for different types of users of a project
+
+exports.PROJECT_GROUPS = ['owner', 'collaborator', 'viewer', 'invited_collaborator', 'invited_viewer']
+
+
+# turn an arbitrary string into a nice clean identifier that can safely be used in an URL
+exports.make_valid_name = (s) ->
+    # for now we just delete anything that isn't alphanumeric.
+    # See http://stackoverflow.com/questions/9364400/remove-not-alphanumeric-characters-from-string-having-trouble-with-the-char/9364527#9364527
+    # whose existence surprised me!
+    return s.replace(/\W/g, '_').toLowerCase()
+
+
+
+
+
+
 

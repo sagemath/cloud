@@ -11,7 +11,7 @@
 #
 #
 # NOTE: For local debugging, run this way, since it gives better stack
-# traces.
+# traces.CodeMirrorSession: _connect to file
 #
 #         make_coffee && echo "require('local_hub').start_server()" | coffee
 #
@@ -37,50 +37,23 @@ diffsync       = require 'diffsync'
 
 json = (out) -> misc.trunc(misc.to_json(out),512)
 
-
-# Any non-absolute path is assumed to be relative to the user's home directory.
-# This function converts such a path to an absolute path.
-abspath = (path) ->
-    if path.length == 0
-        return process.env.HOME
-    if path[0] == '/'
-        return path  # already an absolute path
-    return process.env.HOME + '/' + path
-
-# Other path related functions...
-
-# Make sure that that the directory containing the file indicated by
-# the path exists and has the right permissions.
-ensure_containing_directory_exists = (path, cb) ->   # cb(err)
-    path = abspath(path)
-    dir = misc.path_split(path).head  # containing path
-
-    fs.exists dir, (exists) ->
-        if exists
-            cb()
-        else
-            async.series([
-                (cb) ->
-                    if dir != ''
-                        # recursively make sure the entire chain of directories exists.
-                        ensure_containing_directory_exists(dir, cb)
-                    else
-                        cb()
-                (cb) ->
-                    fs.mkdir(dir, 0o700, cb)
-            ], cb)
+{ensure_containing_directory_exists, abspath} = misc_node
 
 #####################################################################
 # Generate the "secret_token" file as
-# $HOME/.sagemathcloud/data/secret_token if it does not already
+# $SAGEMATHCLOUD/data/secret_token if it does not already
 # exist.  All connections to all local-to-the user services that
 # SageMathClouds starts must be prefixed with this key.
 #####################################################################
 
 # WARNING -- the sage_server.py program can't get these definitions from
 # here, since it is not written in node; if this path changes, it has
-# to be change there as well.
-CONFPATH = exports.CONFPATH = abspath('.sagemathcloud/data/')
+# to be change there as well (it will use the SAGEMATHCLOUD environ
+# variable though).
+
+DATA = process.env['SAGEMATHCLOUD'] + '/data'
+
+CONFPATH = exports.CONFPATH = abspath(DATA)
 secret_token_filename = exports.secret_token_filename = "#{CONFPATH}/secret_token"
 secret_token = undefined
 
@@ -91,14 +64,6 @@ secret_token_length = 128
 
 init_confpath = () ->
     async.series([
-        # Ensure the CONFPATH has maximally restrictive permissions, since
-        # secret info will be stored there.
-        (cb) ->
-            winston.debug("restrict permissions")
-            misc_node.execute_code
-                command : "chmod"
-                args    : ['u+rw,og-rwx', '-R', abspath('.sagemathcloud')]
-                cb      : cb
 
         # Read or create the file; after this step the variable secret_token
         # is set and the file exists.
@@ -115,9 +80,7 @@ init_confpath = () ->
                         secret_token = buf.toString('base64')
                         fs.writeFile(secret_token_filename, secret_token, cb)
 
-        # Ensure restrictive permissions on the secret token file.  The
-        # directory permissions already restrict anybody else from
-        # looking at this file, but we do this as well, just in case.
+        # Ensure restrictive permissions on the secret token file.
         (cb) ->
             fs.chmod(secret_token_filename, 0o600, cb)
     ])
@@ -131,7 +94,7 @@ get_port = (type, cb) ->   # cb(err, port number)
     if ports[type]?
         cb(false, ports[type])
     else
-        fs.readFile abspath(".sagemathcloud/data/#{type}_server.port"), (err, content) ->
+        fs.readFile abspath("#{DATA}/#{type}_server.port"), (err, content) ->
             if err
                 cb(err)
             else
@@ -168,22 +131,24 @@ class ConsoleSessions
     # Connect to (if 'running'), restart (if 'dead'), or create (if
     # non-existing) the console session with mesg.session_uuid.
     connect: (client_socket, mesg) =>
+        winston.debug("connect to console session #{mesg.session_uuid}")
         session = @_sessions[mesg.session_uuid]
         if session? and session.status == 'running'
-            client_socket.write_mesg('json', session.desc)
-            client_socket.write(session.history)
+            winston.debug("console session exists and is running")
+            client_socket.write_mesg('json', {desc:session.desc, history:session.history.toString()})
             plug(client_socket, session.socket)
             session.clients.push(client_socket)
         else
+            winston.debug("console session does not exist or is not running, so we make a new session")
             get_port 'console', (err, port) =>
-                winston.debug("Got console server port = #{port}")
+                winston.debug("got console server port = #{port}")
                 if err
                     winston.debug("can't determine console server port; probably console server not running")
                     client_socket.write_mesg('json', message.error(id:mesg.id, error:"problem determining port of console server."))
                 else
-                    @_new_session(client_socket, mesg, port)
+                    @_new_session(client_socket, mesg, port, session?.history)
 
-    _new_session: (client_socket, mesg, port) =>
+    _new_session: (client_socket, mesg, port, history) =>
         winston.debug("_new_session: defined by #{json(mesg)}")
         # Connect to port CONSOLE_PORT, send mesg, then hook sockets together.
         misc_node.connect_to_locked_socket
@@ -200,7 +165,9 @@ class ConsoleSessions
                 console_socket.write_mesg('json', mesg)
                 # Read one JSON message back, which describes the session
                 console_socket.once 'mesg', (type, desc) =>
-                    client_socket.write_mesg('json', desc)
+                    if not history?
+                        history = new Buffer(0)
+                    client_socket.write_mesg('json', {desc:desc, history:history.toString()})  # in future, history could be read from a file
                     # Disable JSON mesg protocol, since it isn't used further
                     misc_node.disable_mesg(console_socket)
                     misc_node.disable_mesg(client_socket)
@@ -210,39 +177,56 @@ class ConsoleSessions
                         desc    : desc,
                         status  : 'running',
                         clients : [client_socket],
-                        history : new Buffer(0)
+                        history : history
                         session_uuid : mesg.session_uuid
                         project_id   : mesg.project_id
 
                     # Connect the sockets together.
+
+                    # receive data from the user (typing at their keyboard)
                     client_socket.on 'data', (data) ->
+                        activity()
                         console_socket.write(data)
 
                     session.amount_of_data = 0
-                    setInterval(( () -> session.amount_of_data = 0), 15)
+                    session.last_data = misc.mswalltime()
+
+                    # receive data from the pty, which we push out to the user (via global hub)
                     console_socket.on 'data', (data) ->
-                        if session.amount_of_data > 50000
-                            # we are getting a *massive* burst of output
-                            # (1) send control-c -- maybe it will help
-                            console_socket.write(String.fromCharCode(3))
-                            # (2) and ignore more data
-                            client_socket.write('[Ctrl-C]')
-                            return
+
+                        # every 2 ms we reset the burst data watcher.
+                        tm = misc.mswalltime()
+                        if tm - session.last_data >= 2
+                            session.amount_of_data = 0
+                        session.last_data = tm
+
+                        if session.amount_of_data > 200000
+                            # We just got more than 200000 characters of output in <= 2 ms, so truncate it.
+                            # I had a control-c here, but it was EVIL (and useless), so do *not* enable this.
+                            #      console_socket.write(String.fromCharCode(3))
+                            # client_socket.write('[...]')
+                            data = '[...]'
 
                         session.history += data
                         session.amount_of_data += data.length
                         n = session.history.length
-                        if n > 150000  # TODO: totally arbitrary; also have to change the same thing in hub.coffee
-                            session.history = session.history.slice(100000)
+                        if n > 400000  # TODO: totally arbitrary; also have to change the same thing in hub.coffee
+                            session.history = session.history.slice(session.history.length - 300000)
+
+                        # Never push more than 20000 characters at once to client hub, since that could overwhelm...
+                        if data.length > 20000
+                            data = "[...]"+data.slice(data.length-20000)
+
                         client_socket.write(data)
 
                     @_sessions[mesg.session_uuid] = session
 
                 console_socket.on 'end', () =>
+                    winston.debug("console session #{mesg.session_uuid} ended")
                     session = @_sessions[mesg.session_uuid]
                     if session?
                         session.status = 'done'
-                    # TODO: should we close client_socket here?
+                    client_socket.end()
 
     # Return object that describes status of all Console sessions
     info: (project_id) =>
@@ -281,6 +265,7 @@ get_sage_socket = (cb) ->  # cb(err, socket that is ready to use)
                 cb    : (err, _socket) =>
                     if err
                         forget_port('sage')
+                        winston.debug("unlock socket: _new_session: sage session denied connection: #{err}")
                         cb("_new_session: sage session denied connection: #{err}")
                         return
                     sage_socket = _socket
@@ -307,10 +292,13 @@ get_sage_socket = (cb) ->  # cb(err, socket that is ready to use)
 plug = (s1, s2) ->
     # Connect the sockets together.
     s1.on 'data', (data) ->
+        activity()   # record incoming activity  (don't do this in other direction, since that shouldn't keep session alive)
         s2.write(data)
     s2.on 'data', (data) ->
         s1.write(data)
 
+## WARNING!  I think this is no longer used!  It was used for my first (few)
+## approaches to worksheets.
 
 class SageSessions
     constructor: () ->
@@ -364,17 +352,27 @@ class SageSessions
                 else
                     @_new_session(client_socket, mesg, port)
 
-    _new_session: (client_socket, mesg, port) =>
-        winston.debug("Creating new sage session")
+    _new_session: (client_socket, mesg, port, retries) =>
+        winston.debug("_new_session: creating new sage session (retries=#{retries})")
         # Connect to port, send mesg, then hook sockets together.
         misc_node.connect_to_locked_socket
             port  : port
             token : secret_token
             cb    : (err, sage_socket) =>
                 if err
-                    forget_port('sage')
-                    client_socket.write_mesg('json', message.error(id:mesg.id, error:"local_hub -- Problem connecting to Sage server. -- #{err}"))
                     winston.debug("_new_session: sage session denied connection: #{err}")
+                    forget_port('sage')
+                    if not retries? or retries <= 5
+                        if not retries?
+                            retries = 1
+                        else
+                            retries += 1
+                        try_again = () =>
+                            @_new_session(client_socket, mesg, port, retries)
+                        setTimeout(try_again, 1000)
+                    else
+                        # give up.
+                        client_socket.write_mesg('json', message.error(id:mesg.id, error:"local_hub -- Problem connecting to Sage server. -- #{err}"))
                     return
                 else
                     winston.debug("Successfully unlocked a sage session connection.")
@@ -439,7 +437,7 @@ sage_sessions = new SageSessions()
 class DiffSyncFile_server extends diffsync.DiffSync
     constructor:(@cm_session, cb)  ->
         @path = @cm_session.path
-        @_backup_file = meta_file(@path, 'backup')
+        @_backup_file = misc.meta_file(@path, 'backup')
         # check for need to save a backup every this many milliseconds
         @_autosave = setInterval(@write_backup, 10000)
 
@@ -449,12 +447,42 @@ class DiffSyncFile_server extends diffsync.DiffSync
         # knowing about the backup, in which case it makes more sense
         # to just go with the master.
 
-        fs.stat @path, (no_master,stats_path) =>
-            fs.stat @_backup_file, (no_backup,stats_backup) =>
-                if no_backup # no backup file -- always use master
+        no_master = undefined
+        stats_path = undefined
+        no_backup = undefined
+        stats_backup = undefined
+        file = undefined
+
+        async.series([
+            (cb) =>
+                fs.stat @path, (_no_master, _stats_path) =>
+                    no_master = _no_master
+                    stats_path = _stats_path
+                    cb()
+            (cb) =>
+                fs.stat @_backup_file, (_no_backup, _stats_backup) =>
+                    no_backup = _no_backup
+                    stats_backup = _stats_backup
+                    cb()
+            (cb) =>
+                if no_backup and no_master
+                    # neither exist -- create
                     file = @path
+                    misc_node.ensure_containing_directory_exists @path, (err) =>
+                        if err
+                            cb(err)
+                        else
+                            fs.open file, 'w', (err, fd) =>
+                                if err
+                                    cb(err)
+                                else
+                                    fs.close fd, cb
+                else if no_backup # no backup file -- always use master
+                    file = @path
+                    cb()
                 else if no_master # no master file but there is a backup file -- use backup
                     file = @_backup_file
+                    cb()
                 else
                     # both master and backup exist
                     if stats_path.mtime.getTime() >= stats_backup.mtime.getTime()
@@ -463,29 +491,39 @@ class DiffSyncFile_server extends diffsync.DiffSync
                     else
                         # backup is newer
                         file = @_backup_file
+                    cb()
+            (cb) =>
                 fs.readFile file, (err, data) =>
                     if err
                         cb(err); return
-                    @init(doc:data.toString(), id:"file_server")
+                    # NOTE: we immediately delete \r's since the client editor (Codemirror) immediately deletes them
+                    # on editor creation; if we don't delete them, all sync attempts fail and hell is unleashed.
+                    @init(doc:data.toString().replace(/\r/g,''), id:"file_server")
                     # winston.debug("got new file contents = '#{@live}'")
                     @_start_watching_file()
-                    cb(err, @live)
+                    cb(err)
+
+        ], (err) => cb(err, @live))
 
     kill: () =>
         if @_autosave?
             clearInterval(@_autosave)
 
+        # be sure to clean this up, or -- after 11 times -- it will suddenly be impossible for
+        # the user to open a file without restarting their project server! (NOT GOOD)
+        fs.unwatchFile(@path, @_watcher)
+
     _watcher: (event) =>
         winston.debug("watch: file '#{@path}' modified.")
         if not @_do_watch
-            winston.debug("watch: skipping read do to watching being turned off.")
+            winston.debug("watch: skipping read because watching is off.")
             return
         @_stop_watching_file()
         fs.readFile @path, (err, data) =>
             if err
                 @_start_watching_file()
             else
-                @live = data.toString()
+                @live = data.toString().replace(/\r/g,'')  # NOTE: we immediately delete \r's (see above).
                 @cm_session.sync_filesystem (err) =>
                     @_start_watching_file()
 
@@ -494,6 +532,7 @@ class DiffSyncFile_server extends diffsync.DiffSync
             @_do_watch = true
             return
         @_do_watch = true
+        winston.debug("watching #{@path}")
         fs.watchFile(@path, @_watcher)
 
     _stop_watching_file: () =>
@@ -537,12 +576,15 @@ class DiffSyncFile_server extends diffsync.DiffSync
 
     write_to_disk: (cb) =>
         @_stop_watching_file()
-        fs.writeFile @path, @live, (err) =>
-            @_start_watching_file()
-            if not err
-                fs.exists @_backup_file, (exists) =>
-                    fs.unlink(@_backup_file)
-            cb?(err)
+        ensure_containing_directory_exists @path, (err) =>
+            if err
+                cb?(err); return
+            fs.writeFile @path, @live, (err) =>
+                @_start_watching_file()
+                if not err
+                    fs.exists @_backup_file, (exists) =>
+                        fs.unlink(@_backup_file)
+                cb?(err)
 
     write_backup: (cb) =>
         if @cm_session.content != @_last_backup
@@ -579,53 +621,10 @@ class CodeMirrorDiffSyncHub
             id               : @current_mesg_id
             edit_stack       : edit_stack
             last_version_ack : last_version_ack
+        cb?()
 
     sync_ready: () =>
         @write_mesg('diffsync_ready')
-
-meta_file = (path, ext) ->
-    p = misc.path_split(path)
-    path = p.head
-    if p.head != ''
-        path += '/'
-    return path + "." + p.tail + ".sage-" + ext
-
-class ChatRecorder
-    constructor: (path, cb) ->
-        @path = meta_file(path, 'chat')
-        winston.debug("ChatRecorder '#{@path}'")
-        @log = []
-        fs.readFile @path, (err, data) =>
-            if err
-                cb(false, @)  #ok -- just start new log
-            else
-                # Take the lines that parse
-                for line in data.toString().split('\n')
-                    if line.length > 0
-                        try
-                            @log.push(misc.from_json(line))
-                        catch e
-                            # do nothing -- no worries.
-                cb(false, @)
-
-    save: (mesg) =>  # WARNING: this deletes the session_uuid!
-        m =   # what is saved is also defined in local_hub.coffee in client_broadcast.
-            name  : mesg.name
-            color : mesg.color
-            date  : mesg.date
-            mesg  : mesg.mesg
-        @log.push(m)
-        @_save_to_file(m)
-
-    _save_to_file: (mesg) =>
-        if @_appending_to_file? and @_appending_to_file
-            # Try again in 500ms....
-            setTimeout( (() => @_save_to_file(mesg)), 500)
-            return
-
-        @_appending_to_file = true
-        fs.appendFile @path, JSON.stringify(mesg)+'\n', () =>
-            @_appending_to_file = false
 
 
 class CodeMirrorSession
@@ -640,26 +639,38 @@ class CodeMirrorSession
 
         async.series([
             (cb) =>
-                # The upstream version of this document -- the *actual* file on disk.
+                # if File doesn't exist, try to create it.
+                fs.exists @path, (exists) =>
+                    if exists
+                        cb()
+                    else
+                        fs.open @path,'w', (err, fd) =>
+                            if err
+                                cb(err)
+                            else
+                                fs.close(fd, cb)
+            (cb) =>
+                misc_node.is_file_readonly
+                    path : @path
+                    cb   : (err, readonly) =>
+                        @readonly = readonly
+                        cb(err)
+            (cb) =>
+                # If this is a non-readonly sagews file, create corresponding sage session.
+                if not @readonly and misc.filename_extension(@path) == 'sagews'
+                    @process_new_content = @sage_update
+                    @sage_socket(cb)
+                else
+                    cb()
+            (cb) =>
+                # The *actual* file on disk.  It's important to create this
+                # after successfully getting the sage socket, since if we fail to
+                # get the sage socket we end up creating too many fs.watch's on this file...
                 @diffsync_fileserver = new DiffSyncFile_server @, (err, content) =>
                     if err
                         cb(err); return
                     @content = content
                     @diffsync_fileclient = new DiffSyncFile_client(@diffsync_fileserver)
-                    cb()
-            (cb) =>
-                # Create chatroom recorder.
-                new ChatRecorder @path, (err, obj) =>
-                    if err
-                        cb(err); return
-                    @chat_recorder = obj
-                    cb()
-            (cb) =>
-                # If this is a sagews file, create corresponding sage session.
-                if misc.filename_extension(@path) == 'sagews'
-                    @sage_socket(cb)
-                    @process_new_content = @sage_update
-                else
                     cb()
         ], (err) => cb?(err, @))
 
@@ -678,12 +689,20 @@ class CodeMirrorSession
                 @_sage_socket = undefined
                 @sage_update(kill:true)
 
-        winston.debug("Opening a Sage session.")
+        winston.debug("sage_socket: Opening a Sage session.")
+
+        # Ensure that no cells appear to be running.  This is important
+        # because the worksheet file that we just loaded could have had some
+        # markup that cells are running.
+        @sage_update(kill:true)
+
+        # Connect to the local Sage server.
         get_sage_socket (err, socket) =>
             if err
+                winston.debug("sage_socket: fail -- #{err}.")
                 cb(err)
             else
-                winston.debug("Successfully opened a Sage session for worksheet '#{@path}'")
+                winston.debug("sage_socket: successfully opened a Sage session for worksheet '#{@path}'")
                 @_sage_socket = socket
 
                 # Set path to be the same as the file.
@@ -702,10 +721,31 @@ class CodeMirrorSession
                     #winston.debug("sage session: received message #{type}, #{misc.to_json(mesg)}")
                     switch type
                         when 'blob'
-                            winston.debug("codemirror session: got blob from sage session; forwarding to all connected hubs.")
-                            for id, ds_client of @diffsync_clients
+                            sha1 = mesg.uuid
+                            if @diffsync_clients.length == 0
+                                error = 'no global hubs are connected to the local hub, so nowhere to send file'
+                                winston.debug("codemirror session: got blob from sage session -- #{error}")
+                                resp =  message.save_blob
+                                    error  : error
+                                    sha1   : sha1
+                                socket.write_mesg('json', resp)
+                            else
+                                winston.debug("codemirror session: got blob from sage session -- forwarding to a random hub")
+                                hub = misc.random_choice_from_obj(@diffsync_clients)
+                                id = hub[0]; ds_client = hub[1]
                                 ds_client.remote.socket.write_mesg('blob', mesg)
+
+                                receive_save_blob_message
+                                    sha1 : sha1
+                                    cb   : (resp) -> socket.write_mesg('json', resp)
+
+                                ## DEBUG -- for testing purposes -- simulate the response message
+                                ## handle_save_blob_message(message.save_blob(sha1:sha1,ttl:1000))
+
+
                         when 'json'
+                            # First check for callbacks (e.g., used in interact and things where the
+                            # browser directly asks to evaluate code in this session).
                             c = @_sage_output_cb[mesg.id]
                             if c?
                                 c(mesg)
@@ -713,6 +753,18 @@ class CodeMirrorSession
                                     delete @_sage_output_cb[mesg.id]
                                 return
 
+                            # Handle code execution in browser messages
+                            if mesg.event == 'execute_javascript'
+                                # winston.debug("got execute_javascript message from sage session #{json(mesg)}")
+                                # Wrap and forward it on as a broadcast message.
+                                mesg.session_uuid = @session_uuid
+                                bcast = message.codemirror_bcast
+                                    session_uuid : @session_uuid
+                                    mesg         : mesg
+                                @client_bcast(undefined, bcast)
+                                return
+
+                            # Finally, handle output messages
                             m = {}
                             for x, y of mesg
                                 if x != 'id' and x != 'event'  # the event is always "output"
@@ -721,17 +773,24 @@ class CodeMirrorSession
                                             m[x] = y
                                     else
                                         m[x] = y
-                            winston.debug("sage --> local_hub: '#{json(mesg)}'")
+
+                            #winston.debug("sage --> local_hub: '#{json(mesg)}'")
+
+                            before = @content
                             @sage_output_mesg(mesg.id, m)
-                            @set_content(@content)
-                            # Suggest to all connected clients to sync.
-                            for id, ds_client of @diffsync_clients
-                                ds_client.remote.sync_ready()
+                            if before != @content
+                                @_set_content_and_sync()
 
                 # Submit all auto cells to be evaluated.
                 @sage_update(auto:true)
 
                 cb(false, @_sage_socket)
+
+    _set_content_and_sync: () =>
+        @set_content(@content)
+        # Suggest to all connected clients to sync.
+        for id, ds_client of @diffsync_clients
+            ds_client.remote.sync_ready()
 
 
     sage_execute_cell: (id) =>
@@ -748,7 +807,11 @@ class CodeMirrorSession
             @_sage_output_to_input_id[output_id] = id
             winston.debug("start running -- #{id}")
 
+            # Change the cell to "running" mode - this doesn't generate output, so we must explicit force clients
+            # to sync.
             @sage_set_cell_flag(id, diffsync.FLAGS.running)
+            @_set_content_and_sync()
+
             @sage_socket (err, socket) =>
                 if err
                     winston.debug("Error getting sage socket: #{err}")
@@ -817,6 +880,8 @@ class CodeMirrorSession
         opts = defaults opts,
             kill : false    # if true, just remove all running flags.
             auto : false    # if true, run all cells that have the auto flag set
+        if not @content?  # document not initialized
+            return
         # Here we:
         #    - scan the string @content for execution requests.
         #    - also, if we see a cell UUID that we've seen already, we randomly generate
@@ -837,6 +902,16 @@ class CodeMirrorSession
                 # oops, repeated "unique" id, so fix it.
                 id = uuid.v4()
                 @content = @content.slice(0,i+1) + id + @content.slice(i+37)
+                # Also, if 'r' in the flags for this cell, remove it since it
+                # can't possibly be already running (given the repeat).
+                flags = @content.slice(i+37, j)
+                if diffsync.FLAGS.running in flags
+                    new_flags = ''
+                    for t in flags
+                        if t != diffsync.FLAGS.running
+                            new_flags += t
+                    @content = @content.slice(0,i+37) + new_flags + @content.slice(j)
+
             prev_ids[id] = true
             flags = @content.slice(i+37, j)
             if opts.kill
@@ -904,6 +979,21 @@ class CodeMirrorSession
 
         if misc.is_empty_object(mesg)
             return
+
+        if mesg.once? and mesg.once
+            # only javascript is define  once=True
+            if mesg.javascript?
+                msg = message.execute_javascript
+                    session_uuid : @session_uuid
+                    code         : mesg.javascript.code
+                    coffeescript : mesg.javascript.coffeescript
+                    obj          : mesg.obj
+                    cell_id      : cell_id
+                bcast = message.codemirror_bcast
+                    session_uuid : @session_uuid
+                    mesg         : msg
+                @client_bcast(undefined, bcast)
+                return  # once = do *not* want to record this message in the output stream.
 
         i = @content.indexOf(diffsync.MARKERS.output + output_id)
         if i == -1
@@ -1013,10 +1103,6 @@ class CodeMirrorSession
 
     ##############################
 
-
-    chat_log: () =>
-        return @chat_recorder.log
-
     kill: () =>
         # Put any cleanup here...
         winston.debug("Killing session #{@session_uuid}")
@@ -1045,23 +1131,20 @@ class CodeMirrorSession
         winston.debug("client_bcast: #{json(mesg)}")
 
         # Forward this message on to all global hubs except the
-        # one that just sent it to us.
+        # one that just sent it to us...
         for id, ds_client of @diffsync_clients
-            if socket.id != id
-                winston.debug("BROADCAST: sending message from hub with socket.id=#{socket.id} to hub with socket.id = #{id}")
+            if socket?.id != id
+                #winston.debug("BROADCAST: sending message from hub with socket.id=#{socket?.id} to hub with socket.id = #{id}")
                 ds_client.remote.socket.write_mesg('json', mesg)
-
-        # If this is a chat message, save it.
-        if mesg?.mesg.event == 'chat'
-            @chat_recorder.save(mesg)
 
     client_diffsync: (socket, mesg) =>
         @is_active = true
+
         write_mesg = (event, obj) ->
             if not obj?
                 obj = {}
             obj.id = mesg.id
-            socket.write_mesg 'json', message['event'](obj)
+            socket.write_mesg 'json', message[event](obj)
 
         # Message from some client reporting new edits, thus initiating a sync.
         ds_client = @diffsync_clients[socket.id]
@@ -1069,9 +1152,15 @@ class CodeMirrorSession
             write_mesg('error', {error:"client #{socket.id} not registered for synchronization."})
             return
 
+        if @_client_sync_lock # or Math.random() <= .5 # (for testing)
+            winston.debug("client_diffsync hit a sync lock -- send retry message back")
+            write_mesg('error', {error:"retry"})
+
+        @_client_sync_lock = true
         before = @content
         ds_client.recv_edits    mesg.edit_stack, mesg.last_version_ack, (err) =>
             @set_content(ds_client.live)
+            @_client_sync_lock = false
             @process_new_content?()
             # Send back our own edits to the global hub.
             ds_client.remote.current_mesg_id = mesg.id  # used to tag the return message
@@ -1161,7 +1250,7 @@ class CodeMirrorSessions
                 session_uuid : session.session_uuid
                 path         : session.path
                 content      : session.content
-                chat         : session.chat_log()
+                readonly     : session.readonly
 
         if mesg.session_uuid?
             session = @_sessions.by_uuid[mesg.session_uuid]
@@ -1187,7 +1276,7 @@ class CodeMirrorSessions
                 finish(session)
 
     add_session_to_cache: (opts) =>
-        opt = defaults opts,
+        opts = defaults opts,
             session    : required
             project_id : undefined
             timeout    : undefined   # or a time in seconds
@@ -1321,7 +1410,7 @@ read_file_from_project = (socket, mesg) ->
     archive = undefined
     async.series([
         (cb) ->
-            winston.debug("Determine whether the path '#{path}' is a directory or file.")
+            #winston.debug("Determine whether the path '#{path}' is a directory or file.")
             fs.stat path, (err, stats) ->
                 if err
                     cb(err)
@@ -1334,15 +1423,15 @@ read_file_from_project = (socket, mesg) ->
                     cb("The only supported directory archive format is tar.bz2")
                     return
                 target  = temp.path(suffix:'.' + mesg.archive)
-                winston.debug("'#{path}' is a directory, so archive it to '#{target}', change path, and read that file")
+                #winston.debug("'#{path}' is a directory, so archive it to '#{target}', change path, and read that file")
                 archive = mesg.archive
                 if path[path.length-1] == '/'  # common nuisance with paths to directories
                     path = path.slice(0,path.length-1)
                 split = misc.path_split(path)
                 path = target
                 # same patterns also in project.coffee (TODO)
-                args = ['--exclude=.sagemathcloud', '--exclude=.forever', '--exclude=.node*', '--exclude=.npm', '--exclude=.sage', '-jcf', target, split.tail]
-                winston.debug("tar #{args.join(' ')}")
+                args = ["--exclude=.sagemathcloud*", '--exclude=.forever', '--exclude=.node*', '--exclude=.npm', '--exclude=.sage', '-jcf', target, split.tail]
+                #winston.debug("tar #{args.join(' ')}")
                 child_process.execFile 'tar', args, {cwd:split.head}, (err, stdout, stderr) ->
                     if err
                         winston.debug("Issue creating tarball: #{err}, #{stdout}, #{stderr}")
@@ -1350,17 +1439,17 @@ read_file_from_project = (socket, mesg) ->
                     else
                         cb()
             else
-                winston.debug("It is a file.")
+                #winston.debug("It is a file.")
                 cb()
 
         (cb) ->
-            winston.debug("Read the file into memory.")
+            #winston.debug("Read the file into memory.")
             fs.readFile path, (err, _data) ->
                 data = _data
                 cb(err)
 
         (cb) ->
-            winston.debug("Compute hash of file.")
+            #winston.debug("Compute hash of file.")
             id = misc_node.uuidsha1(data)
             winston.debug("Hash = #{id}")
             cb()
@@ -1375,7 +1464,7 @@ read_file_from_project = (socket, mesg) ->
         #     cb()
 
         (cb) ->
-            winston.debug("Finally, we send the file as a blob back to the hub.")
+            #winston.debug("Finally, we send the file as a blob back to the hub.")
             socket.write_mesg 'json', message.file_read_from_project(id:mesg.id, data_uuid:id, archive:archive)
             socket.write_mesg 'blob', {uuid:id, blob:data}
             cb()
@@ -1401,14 +1490,14 @@ write_file_to_project = (socket, mesg) ->
                 (cb) ->
                     ensure_containing_directory_exists(path, cb)
                 (cb) ->
-                    winston.debug('writing the file')
+                    #winston.debug('writing the file')
                     fs.writeFile(path, value.blob, cb)
             ], (err) ->
                 if err
-                    winston.debug("error writing file -- #{err}")
+                    #winston.debug("error writing file -- #{err}")
                     socket.write_mesg 'json', message.error(id:mesg.id, error:err)
                 else
-                    winston.debug("wrote file '#{path}' fine")
+                    #winston.debug("wrote file '#{path}' fine")
                     socket.write_mesg 'json', message.file_written_to_project(id:mesg.id)
             )
     socket.on 'mesg', write_file
@@ -1445,19 +1534,65 @@ project_exec = (socket, mesg) ->
                     error : "Error executing code '#{mesg.command}, #{mesg.bash}' -- #{err}, #{out?.stdout}, #{out?.stderr}"
                 socket.write_mesg('json', err_mesg)
             else
-                winston.debug(json(out))
+                #winston.debug(json(out))
                 socket.write_mesg 'json', message.project_exec_output
                     id        : mesg.id
                     stdout    : out.stdout
                     stderr    : out.stderr
                     exit_code : out.exit_code
 
+_save_blob_callbacks = {}
+receive_save_blob_message = (opts) ->
+    opts = defaults opts,
+        sha1    : required
+        cb      : required
+        timeout : 30  # maximum time in seconds to wait for response message
+
+    sha1 = opts.sha1
+    id = misc.uuid()
+    if not _save_blob_callbacks[sha1]?
+        _save_blob_callbacks[sha1] = [[opts.cb, id]]
+    else
+        _save_blob_callbacks[sha1].push([opts.cb, id])
+
+    # Timeout functionality -- send a response after opts.timeout seconds,
+    # in case no hub responded.
+    f = () ->
+        v = _save_blob_callbacks[sha1]
+        if v?
+            mesg = message.save_blob
+                sha1  : sha1
+                error : 'timed out after local hub waited for #{opts.timeout} seconds'
+
+            w = []
+            for x in v   # this is O(n) instead of O(1), but who cares since n is usually 1.
+                if x[1] == id
+                    x[0](mesg)
+                else
+                    w.push(x)
+
+            if w.length == 0
+                delete _save_blob_callbacks[sha1]
+            else
+                _save_blob_callbacks[sha1] = w
+
+    if opts.timeout
+        setTimeout(f, opts.timeout*1000)
+
+
+handle_save_blob_message = (mesg) ->
+    v = _save_blob_callbacks[mesg.sha1]
+    if v?
+        for x in v
+            x[0](mesg)
+        delete _save_blob_callbacks[mesg.sha1]
 
 ###############################################
 # Handle a message from the client
 ###############################################
 
 handle_mesg = (socket, mesg, handler) ->
+    activity()  # record that there was some activity so process doesn't killall
     try
         winston.debug("Handling '#{json(mesg)}'")
         if mesg.event.split('_')[0] == 'codemirror'
@@ -1488,6 +1623,8 @@ handle_mesg = (socket, mesg, handler) ->
                     socket.write_mesg('json', message.signal_sent(id:mesg.id))
             when 'terminate_session'
                 terminate_session(socket, mesg)
+            when 'save_blob'
+                handle_save_blob_message(mesg)
             else
                 if mesg.id?
                     err = message.error(id:mesg.id, error:"Local hub received an invalid mesg type '#{mesg.event}'")
@@ -1528,13 +1665,99 @@ server = net.createServer (socket) ->
                     handle_mesg(socket, mesg, handler)
             socket.on 'mesg', handler
 
+
+start_tcp_server = (cb) ->
+    winston.info("starting tcp server...")
+    server.listen program.port, '127.0.0.1', () ->
+        winston.info("listening on port #{server.address().port}")
+        fs.writeFile(abspath("#{DATA}/local_hub.port"), server.address().port, cb)
+
+start_raw_server = (cb) ->
+    winston.info("starting raw server...")
+    # It's fine to move these lines to the outer scope... when they are needed there.
+    try
+        info = fs.readFileSync("#{process.env['SAGEMATHCLOUD']}/info.json")
+        winston.debug("info = #{info}")
+        info = JSON.parse(info)
+        # We do the following for backward compatibility -- old projects may have an
+        # old base_url laying around.
+        if not info.base_url?
+            info.base_url = ''
+    catch e
+        winston.debug("Missing or corrupt info.json file -- waiting for a new one. #{e}")
+        # There is really nothing the local hub can do if the info.json file is missing
+        # or corrupt, except to wait for a global hub to copy over a new good version.
+        # A global hub should do this on local hub restart or project connection...
+        # Try again soon.
+        f = () ->
+            start_raw_server(()->)
+        setTimeout(f, 1000)
+        cb() # no error, since other stuff needs to happen
+        return
+
+    express = require('express')
+    raw_server = express()
+    project_id = info.project_id
+    misc_node.free_port (err, port) ->
+        if err
+            winston.debug("error starting raw server: #{err}")
+            cb(err); return
+        base = "#{info.base_url}/#{project_id}/raw/"
+        winston.info("raw server (port=#{port}), host='#{info.location.host}', base='#{base}'")
+        raw_server.configure () ->
+            raw_server.use(base, express.directory(process.env.HOME, {hidden:true, icons:true}))
+            raw_server.use(base, express.static(process.env.HOME, {hidden:true}))
+
+        # NOTE: It is critical to only listen on the host interface, since otherwise other users
+        # on the same VM could listen in.   We firewall connections from the other VM hosts above
+        # port 1024, so this is safe without authentication.
+        raw_server.listen port, info.location.host, (err) ->
+            if err
+                cb(err); return
+            fs.writeFile(abspath("#{DATA}/raw.port"), port, cb)
+
+last_activity = undefined
+# Call this function to signal that there is activity.
+activity = () ->
+    last_activity = misc.mswalltime()
+
+start_kill_monitor = (cb) ->
+    # Start a monitor that periodically checks for some sort of client-initiated hub activity.
+    # If there is none for program.timeout seconds, then all processes running as this user
+    # are killed (including this local hub, of course).
+    if not program.timeout or process.env['USER'].length != 8   # 8 = length of SMC accounts... this excludes 'wstein' (say)
+        winston.debug("Not setting kill monitor")
+        cb()
+        return
+
+    timeout = program.timeout*1000
+    winston.debug("Creating kill monitor to kill if idle for #{program.timeout} seconds")
+    activity()
+    kill_if_inactive = () ->
+        age = misc.mswalltime() - last_activity
+        winston.debug("kill_if_inactive: last activity #{age/1000} seconds ago")
+        if age >= timeout
+            # game over -- kill everything...
+            mesg = "Activity timeout hit: killing everything!"
+            console.log(mesg)
+            winston.debug(mesg)
+            misc_node.execute_code
+                command : "pkill"
+                args    : ['-9', '-u', process.env['USER']]
+                cb      : (err) ->
+                    # shouldn't get hit, since *everything* including this process, gets killed
+
+    # check every 30 seconds
+    setInterval(kill_if_inactive, 30000)
+    cb()
+
 # Start listening for connections on the socket.
 exports.start_server = start_server = () ->
-    init_confpath()
-    server.listen program.port, '127.0.0.1', () ->
-        winston.info "listening on port #{server.address().port}"
-        fs.writeFile(abspath('.sagemathcloud/data/local_hub.port'), server.address().port)
-
+    async.series [start_kill_monitor, start_tcp_server, start_raw_server], (err) ->
+        if err
+            winston.debug("Error starting a server -- #{err}")
+        else
+            winston.debug("Successfully started servers.")
 
 # daemonize it
 
@@ -1542,17 +1765,27 @@ program = require('commander')
 daemon  = require("start-stop-daemon")
 
 program.usage('[start/stop/restart/status] [options]')
-    .option('--pidfile [string]', 'store pid in this file', String, abspath(".sagemathcloud/data/local_hub.pid"))
-    .option('--logfile [string]', 'write log to this file', String, abspath(".sagemathcloud/data/local_hub.log"))
+    .option('--pidfile [string]', 'store pid in this file', String, abspath("#{DATA}/local_hub.pid"))
+    .option('--logfile [string]', 'write log to this file', String, abspath("#{DATA}/local_hub.log"))
+    .option('--debug [string]', 'logging debug level (default: "" -- no debugging output)', String, 'debug')
+    .option('--timeout [number]', 'kill all processes if there is no activity for this many *seconds* (use 0 to disable, which is the default)', Number, 0)
     .parse(process.argv)
 
 if program._name == 'local_hub.js'
+    if program.debug
+        winston.remove(winston.transports.Console)
+        winston.add(winston.transports.Console, level: program.debug)
+
     winston.debug "Running as a Daemon"
     # run as a server/daemon (otherwise, is being imported as a library)
     process.addListener "uncaughtException", (err) ->
         winston.error "Uncaught exception: " + err
         if console? and console.trace?
             console.trace()
+    console.log("setting up conf path")
+    init_confpath()
     console.log("start daemon")
     daemon({pidFile:program.pidfile, outFile:program.logfile, errFile:program.logfile}, start_server)
     console.log("after daemon")
+
+
