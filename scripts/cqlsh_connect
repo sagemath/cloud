@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+PW=`cat $HOME/salvus/salvus/data/secrets/cassandra/hub`
+cqlsh -k salvus -u hub -p $PW $1

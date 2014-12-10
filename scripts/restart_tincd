@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+sudo killall -9 tincd; sleep 3; sudo nice --19 $HOME/salvus/salvus/data/local/sbin/tincd

@@ -1,3 +1,25 @@
+###############################################################################
+#
+# SageMathCloud: A collaborative web-based interface to Sage, IPython, LaTeX and the Terminal.
+#
+#    Copyright (C) 2014, William Stein
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+###############################################################################
+
+
 ####################################################################
 #
 # misc JS functionality that only makes sense on the node side (not on
@@ -178,11 +200,16 @@ exports.connect_to_locked_socket = (opts) ->
         timeout : 5
         cb      : required
 
+    winston.debug("#{misc.to_json(opts)}")
+
     winston.debug("misc_node: connecting to a locked socket on port #{port}...")
     timer = undefined
 
     timed_out = () ->
-        cb("Timed out trying to connect to locked socket on port #{port}")
+        m = "misc_node: timed out trying to connect to locked socket on port #{port}"
+        winston.debug(m)
+        cb?(m)
+        cb = undefined  # NOTE: here and everywhere below we set cb to undefined after calling it, and only call it if defined, since the event and timer callback stuff is very hard to do right here without calling cb more than once (which is VERY bad to do).
         socket.end()
         timer = undefined
 
@@ -195,12 +222,14 @@ exports.connect_to_locked_socket = (opts) ->
             if data.toString() == 'y'
                 if timer?
                     clearTimeout(timer)
-                    cb(false, socket)
+                    cb?(false, socket)
+                    cb = undefined
             else
                 socket.destroy()
                 if timer?
                     clearTimeout(timer)
-                    cb("Permission denied (invalid secret token) when connecting to the local hub.")
+                    cb?("Permission denied (invalid secret token) when connecting to the local hub.")
+                    cb = undefined
         socket.on 'data', listener
         winston.debug("misc_node: connected, now sending secret token")
         socket.write(token)
@@ -209,15 +238,20 @@ exports.connect_to_locked_socket = (opts) ->
     socket.on "error", (err) =>
         if timer?
             clearTimeout(timer)
-        cb(err)
+        cb?(err)
+        cb = undefined
+
 
 
 # Compute a uuid v4 from the Sha-1 hash of data.
 crypto = require('crypto')
-exports.uuidsha1 = (data) ->
+exports.sha1 = (data) ->
     sha1sum = crypto.createHash('sha1')
     sha1sum.update(data)
-    s = sha1sum.digest('hex')
+    return sha1sum.digest('hex')
+
+exports.uuidsha1 = (data) ->
+    s = exports.sha1(data)
     i = -1
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) ->
         i += 1
@@ -253,10 +287,12 @@ exports.execute_code = execute_code = (opts) ->
         uid        : undefined
         gid        : undefined
         env        : undefined   # if given, added to exec environment
+        verbose    : true
         cb         : undefined
 
     start_time = walltime()
-    winston.debug("execute_code: \"#{opts.command} #{opts.args.join(' ')}\"")
+    if opts.verbose
+        winston.debug("execute_code: \"#{opts.command} #{opts.args.join(' ')}\"")
 
     s = opts.command.split(/\s+/g) # split on whitespace
     if opts.args.length == 0 and s.length > 1
@@ -300,7 +336,8 @@ exports.execute_code = execute_code = (opts) ->
             else
                 cmd = opts.command
 
-            winston.debug("execute_code: writing temporary file that contains bash program.")
+            if opts.verbose
+                winston.debug("execute_code: writing temporary file that contains bash program.")
             temp.open '', (err, info) ->
                 if err
                     c(err)
@@ -318,7 +355,8 @@ exports.execute_code = execute_code = (opts) ->
                 c()
 
         (c) ->
-            winston.debug("Spawn the command #{opts.command} with given args #{opts.args}")
+            if opts.verbose
+                winston.debug("Spawn the command #{opts.command} with given args #{opts.args}")
             o = {cwd:opts.path}
             if env?
                 o.env = env
@@ -327,10 +365,17 @@ exports.execute_code = execute_code = (opts) ->
             if opts.gid
                 o.gid = opts.gid
 
-            r = child_process.spawn(opts.command, opts.args, o)
+            try
+                r = child_process.spawn(opts.command, opts.args, o)
+            catch e
+                # Yes, spawn can cause this error if there is no memory, and there's no event! --  Error: spawn ENOMEM
+                c("error #{misc.to_json(e)}")
+                return
+
             ran_code = true
 
-            winston.debug("Listen for stdout, stderr and exit events.")
+            if opts.verbose
+                winston.debug("Listen for stdout, stderr and exit events.")
             stdout = ''
             r.stdout.on 'data', (data) ->
                 data = data.toString()
@@ -362,6 +407,15 @@ exports.execute_code = execute_code = (opts) ->
                 exit_code = code
                 finish()
 
+            # This can happen, e.g., "Error: spawn ENOMEM" if there is no memory.  Without this handler,
+            # an unhandled exception gets raised, which is nasty.
+            # From docs: "Note that the exit-event may or may not fire after an error has occured. "
+            r.on 'error', (err) ->
+                if not exit_code?
+                    exit_code = 1
+                stderr += to_json(err)
+                finish()
+
             callback_done = false
             finish = () ->
                 if stdout_is_done and stderr_is_done and exit_code?
@@ -382,11 +436,13 @@ exports.execute_code = execute_code = (opts) ->
             if opts.timeout?
                 f = () ->
                     if r.exitCode == null
-                        winston.debug("execute_code: subprocess did not exit after #{opts.timeout} seconds, so killing with SIGKILL")
+                        if opts.verbose
+                            winston.debug("execute_code: subprocess did not exit after #{opts.timeout} seconds, so killing with SIGKILL")
                         try
                             r.kill("SIGKILL")  # this does not kill the process group :-(
                         catch e
                             # Exceptions can happen, which left uncaught messes up calling code bigtime.
+                        if opts.verbose
                             winston.debug("execute_code: r.kill raised an exception.")
                         if not callback_done
                             callback_done = true
@@ -401,9 +457,15 @@ exports.execute_code = execute_code = (opts) ->
         # winston.debug("(time: #{walltime() - start_time}): Done running '#{opts.command} #{opts.args.join(' ')}'; resulted in stdout='#{stdout}', stderr='#{stderr}', exit_code=#{exit_code}, err=#{err}")
         # Do not litter:
         if tmpfilename?
-            fs.unlink(tmpfilename)
+            try
+                fs.unlink(tmpfilename)
+            catch e
+                winston.debug("failed to unlink #{tmpfilename}")
 
-        winston.debug("finished exec of #{opts.command}")
+
+        if opts.verbose
+            winston.debug("finished exec of #{opts.command}")
+            winston.debug("stdout=#{stdout},stderr=#{stderr},exit_code=#{exit_code}")
         if not opts.err_on_exit and ran_code
             # as long as we made it to running some code, we consider this a success (that is what err_on_exit means).
             opts.cb?(false, {stdout:stdout, stderr:stderr, exit_code:exit_code})
@@ -468,7 +530,10 @@ free_port = exports.free_port = (cb) ->    # cb(err, available port as assigned 
         port = server.address().port
         server.close()
     server.on "close", ->
-        cb(null, port)
+        f = () ->
+            cb(null, port)
+        # give the OS a chance to really make the port available again.
+        setTimeout(f, 500)
     server.listen(0)
 
 exports.forward_remote_port_to_localhost = (opts) ->
@@ -574,7 +639,9 @@ exports.abspath = abspath = (path) ->
         return process.env.HOME
     if path[0] == '/'
         return path  # already an absolute path
-    return process.env.HOME + '/' + path
+    p = process.env.HOME + '/' + path
+    p = p.replace(/\/\.\//g,'/')    # get rid of /./, which is the same as /...
+    return p
 
 # Other path related functions...
 
@@ -597,7 +664,12 @@ ensure_containing_directory_exists = (path, cb) ->   # cb(err)
                         cb()
                 (cb) ->
                     fs.mkdir(dir, 0o700, cb)
-            ], (err) -> cb?(err))
+            ], (err) ->
+                if err.code == 'EEXIST'
+                    cb?()
+                else
+                    cb?(err)
+            )
 
 exports.ensure_containing_directory_exists = ensure_containing_directory_exists
 

@@ -1,3 +1,25 @@
+###############################################################################
+#
+# SageMathCloud: A collaborative web-based interface to Sage, IPython, LaTeX and the Terminal.
+#
+#    Copyright (C) 2014, William Stein
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+###############################################################################
+
+
 #################################################################
 #
 # console_server -- a node.js tty console server
@@ -163,16 +185,21 @@ program.usage('[start/stop/restart/status] [options]')
     .option('--pidfile [string]', 'store pid in this file (default: "$SAGEMATHCLOUD/data/console_server.pid")', String,
     abspath("#{DATA}/console_server.pid"))
     .option('--logfile [string]', 'write log to this file (default: "$SAGEMATHCLOUD/data/console_server.log")', String,
-    abspath("${DATA}/console_server.log"))
-    .option('--host [string]', 'bind to only this host (default: "127.0.0.1")', String, "127.0.0.1")   # important for security reasons to prevent user binding more specific host attack
+    abspath("#{DATA}/console_server.log"))
+    .option('--forever_logfile [string]', 'write forever log to this file', String, abspath("#{DATA}/forever_console_server.log"))
+    .option('--host [string]', 'bind to this interface (default: 127.0.0.1)', String, "127.0.0.1")
     .parse(process.argv)
 
-if program._name == 'console_server.js'
+if program._name.split('.')[0] == 'console_server'
     # run as a server/daemon (otherwise, is being imported as a library)
     process.addListener "uncaughtException", (err) ->
+        winston.debug("BUG ****************************************************************************")
+        winston.debug("Uncaught exception: " + err)
+        winston.debug(err.stack)
+        winston.debug("BUG ****************************************************************************")
         winston.error "Uncaught exception: " + err
         if console? and console.trace?
             console.trace()
-    daemon({pidFile:program.pidfile, outFile:program.logfile, errFile:program.logfile}, start_server)
+    daemon({pidFile:program.pidfile, outFile:program.logfile, errFile:program.logfile, logFile:program.forever_logfile, max:1}, start_server)
 
 

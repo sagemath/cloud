@@ -1,3 +1,25 @@
+###############################################################################
+#
+# SageMathCloud: A collaborative web-based interface to Sage, IPython, LaTeX and the Terminal.
+#
+#    Copyright (C) 2014, William Stein
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+###############################################################################
+
+
 ##########################################################################
 #
 # Misc. functions that are needed elsewhere.
@@ -52,7 +74,41 @@ exports.random_choice_from_obj = (obj) ->
 exports.randint = (lower, upper) -> Math.floor(Math.random()*(upper - lower + 1)) + lower
 
 # Like Python's string split -- splits on whitespace
-exports.split = (s) -> s.match(/\S+/g)
+exports.split = (s) ->
+    r = s.match(/\S+/g)
+    if r
+        return r
+    else
+        return []
+
+# Like the exports.split method, but quoted terms are grouped together for an exact search. Like bing.
+exports.search_split = (search) ->
+
+    terms = []
+    search = search.split('"')
+    length = search.length
+    for element, i in search
+        element = element.trim()
+        if element.length != 0
+            # the even elements lack quotation
+            # if there are an even number of elements that means there is an unclosed quote,
+            # so the last element shouldn't be grouped.
+            if i % 2 == 0 or (i == length - 1 and length % 2 == 0)
+                terms.push(element.split(" ")...)
+            else
+                terms.push(element)
+    return terms
+
+# Count number of occurrences of m in s-- see http://stackoverflow.com/questions/881085/count-the-number-of-occurences-of-a-character-in-a-string-in-javascript
+
+exports.count = (str, strsearch) ->
+    index = -1
+    count = -1
+    loop
+        index = str.indexOf(strsearch, index + 1)
+        count++
+        break unless index isnt -1
+    return count
 
 # modifies target in place, so that the properties of target are the
 # same as those of upper_bound, and each is <=.
@@ -68,14 +124,16 @@ exports.min_object = (target, upper_bounds) ->
 # obj1.  For each property P of obj2 not specified in obj1, the
 # corresponding value obj1[P] is set (all in a new copy of obj1) to
 # be obj2[P].
-exports.defaults = (obj1, obj2) ->
+exports.defaults = (obj1, obj2, allow_extra) ->
     if not obj1?
         obj1 = {}
     error  = () ->
         try
-            "(obj1=#{exports.to_json(obj1)}, obj2=#{exports.to_json(obj2)})"
+            s = "(obj1=#{exports.trunc(exports.to_json(obj1),1024)}, obj2=#{exports.trunc(exports.to_json(obj2),1024)})"
+            console.log(s)
+            return s
         catch error
-            ""
+            return ""
     if typeof(obj1) != 'object'
         # We put explicit traces before the errors in this function,
         # since otherwise they can be very hard to debug.
@@ -94,10 +152,11 @@ exports.defaults = (obj1, obj2) ->
                 throw "misc.defaults -- TypeError: property '#{prop}' must be specified: #{error()}"
             else
                 r[prop] = obj2[prop]
-    for prop, val of obj1
-        if not obj2.hasOwnProperty(prop)
-            console.trace()
-            throw "misc.defaults -- TypeError: got an unexpected argument '#{prop}' #{error()}"
+    if not allow_extra
+        for prop, val of obj1
+            if not obj2.hasOwnProperty(prop)
+                console.trace()
+                throw "misc.defaults -- TypeError: got an unexpected argument '#{prop}' #{error()}"
     return r
 
 # WARNING -- don't accidentally use this as a default:
@@ -162,6 +221,22 @@ exports.from_json = (x) ->
         console.log("from_json: error parsing #{x} (=#{exports.to_json(x)}) from JSON")
         throw err
 
+# convert to JSON even if there are circular references
+# http://stackoverflow.com/questions/4816099/chrome-sendrequest-error-typeerror-converting-circular-structure-to-json
+
+censor = (censor) ->
+    i = 0
+    return (key, value) ->
+        if i and typeof(censor) == 'object' and typeof(value) == 'object' and censor == value
+            return '[Circular]'
+        if i >= 29 # seems to be a harded maximum of 30 serialized objects?
+            return '[Unknown]';
+        ++i # so we know we aren't using the original object anymore
+        return value
+
+exports.to_json_circular = (x) ->
+    JSON.stringify(x, censor(x))
+
 # converts a Date object to an ISO string in UTC.
 # NOTE -- we remove the +0000 (or whatever) timezone offset, since *all* machines within
 # the SMC servers are assumed to be on UTC.
@@ -179,6 +254,13 @@ exports.len = (obj) ->
 
 # return the keys of an object, e.g., {a:5, xyz:'10'} -> ['a', 'xyz']
 exports.keys = (obj) -> (key for key of obj)
+
+# as in python, makes a map from an array of pairs [(x,y),(z,w)] --> {x:y, z:w}
+exports.dict = (obj) ->
+    x = {}
+    for a in obj
+        x[a[0]] = a[1]
+    return x
 
 # remove first occurrence of value (just like in python);
 # throws an exception if val not in list.
@@ -253,7 +335,7 @@ exports.deep_copy = (obj) ->
     newInstance = new obj.constructor()
 
     for key of obj
-        newInstance[key] = exports.clone obj[key]
+        newInstance[key] = exports.deep_copy(obj[key])
 
     return newInstance
 
@@ -289,6 +371,9 @@ exports.git_author = (first_name, last_name, email_address) -> "#{first_name} #{
 # This is mainly used for banning users.
 
 exports.canonicalize_email_address = (email_address) ->
+    if typeof(email_address) != 'string'
+        # silly, but we assume it is a string, and I'm concerned about a hacker attack involving that
+        email_address = JSON.stringify(email_address)
     # remove + part from email address:   foo+bar@example.com
     i = email_address.indexOf('+')
     if i != -1
@@ -297,6 +382,26 @@ exports.canonicalize_email_address = (email_address) ->
             email_address = email_address.slice(0,i) + email_address.slice(j)
     # make email address lower case
     return email_address.toLowerCase()
+
+exports.lower_email_address = (email_address) ->
+    if typeof(email_address) != 'string'
+        # silly, but we assume it is a string, and I'm concerned about a hacker attack involving that
+        email_address = JSON.stringify(email_address)
+    # make email address lower case
+    return email_address.toLowerCase()
+
+
+exports.parse_user_search = (query) ->
+    queries = (q.trim().toLowerCase() for q in query.split(','))
+    r = {string_queries:[], email_queries:[]}
+    for x in queries
+        if x.indexOf('@') == -1
+            r.string_queries.push(x.split(/\s+/g))
+        else
+            r.email_queries.push(x)
+    return r
+
+
 
 # Delete trailing whitespace in the string s.  See
 exports.delete_trailing_whitespace = (s) ->
@@ -310,19 +415,25 @@ exports.retry_until_success = (opts) ->
     opts = exports.defaults opts,
         f           : exports.required   # f((err) => )
         start_delay : 100             # milliseconds
-        max_delay   : 30000           # milliseconds -- stop increasing time at this point
-        factor      : 1.5             # multiply delay by this each time
-        cb          : undefined       # called with cb() on *success* only -- obviously no way for this function to return an error
+        max_delay   : 20000           # milliseconds -- stop increasing time at this point
+        factor      : 1.4             # multiply delay by this each time
+        max_tries   : undefined
+        cb          : undefined       # called with cb() on *success*; cb(error) if max_tries is exceeded
 
     delta = opts.start_delay
+    tries = 0
     g = () ->
+        tries += 1
         opts.f (err)->
             if err
-                delta = Math.min(opts.max_delay, opts.factor * delta)
-                setTimeout(g, delta)
+                if opts.max_tries? and opts.max_tries <= tries
+                    opts.cb?("maximum tries exceeded - last error #{err}")
+                else
+                    delta = Math.min(opts.max_delay, opts.factor * delta)
+                    setTimeout(g, delta)
             else
                 opts.cb?()
-    setTimeout(g, delta)
+    g()
 
 
 # Attempt (using exponential backoff) to execute the given function.
@@ -352,6 +463,7 @@ class RetryUntilSuccess
             max_tries    : undefined
             min_interval : 100   # if defined, all calls to f will be separated by *at least* this amount of time (to avoid overloading services, etc.)
             logname      : undefined
+            verbose      : false
         if @opts.min_interval?
             if @opts.start_delay < @opts.min_interval
                 @opts.start_delay = @opts.min_interval
@@ -380,7 +492,9 @@ class RetryUntilSuccess
             @f (err) =>
                 @attempts += 1
                 @_calling = false
-                if err? and err
+                if err
+                    if @opts.verbose
+                        console.log("#{@opts.logname}: error=#{err}")
                     if @opts.max_tries? and @attempts >= @opts.max_tries
                         while @_cb_stack.length > 0
                             @_cb_stack.pop()(err)
@@ -483,6 +597,8 @@ exports.uniquify_string = (s) ->
             seen_already[c] = true
     return t
 
+exports.endswith = (s, t) ->
+    return s.slice(s.length - t.length) == t
 
 # Return string t=s+'\n'*k so that t ends in at least n newlines.
 # Returns s itself (so no copy made) if s already ends in n newlines (a common case).
@@ -518,7 +634,176 @@ exports.make_valid_name = (s) ->
 
 
 
+# format is 2014-04-04-061502
+exports.parse_bup_timestamp = (s) ->
+    v = [s.slice(0,4), s.slice(5,7), s.slice(8,10), s.slice(11,13), s.slice(13,15), s.slice(15,17), '0']
+    return new Date("#{v[1]}/#{v[2]}/#{v[0]} #{v[3]}:#{v[4]}:#{v[5]} UTC")
 
+
+
+
+
+exports.hash_string = (s) ->
+    # see http://stackoverflow.com/questions/7616461/generate-a-hash-from-string-in-javascript-jquery
+    hash = 0
+    i = undefined
+    chr = undefined
+    len = undefined
+    return hash if s.length is 0
+    i = 0
+    len = s.length
+    while i < len
+        chr = s.charCodeAt(i)
+        hash = ((hash << 5) - hash) + chr
+        hash |= 0 # convert to 32-bit integer
+        i++
+    return hash
+
+
+
+
+
+
+
+
+
+
+
+
+
+exports.parse_hashtags = (t) ->
+    # return list of pairs (i,j) such that t.slice(i,j) is a hashtag (starting with #).
+    v = []
+    if not t?
+        return v
+    base = 0
+    while true
+        i = t.indexOf('#')
+        if i == -1 or i == t.length-1
+            return v
+        base += i+1
+        if t[i+1] == '#' or not (i == 0 or t[i-1].match(/\s/))
+            t = t.slice(i+1)
+            continue
+        t = t.slice(i+1)
+        # find next whitespace or non-alphanumeric or dash
+        # TODO: this lines means hashtags must be US ASCII --
+        #    see http://stackoverflow.com/questions/1661197/valid-characters-for-javascript-variable-names
+        i = t.match(/\s|[^A-Za-z0-9_\-]/)
+        if i
+            i = i.index
+        else
+            i = -1
+        if i == 0
+            # hash followed immediately by whitespace -- markdown desc
+            base += i+1
+            t = t.slice(i+1)
+        else
+            # a hash tag
+            if i == -1
+                # to the end
+                v.push([base-1, base+t.length])
+                return v
+            else
+                v.push([base-1, base+i])
+                base += i+1
+                t = t.slice(i+1)
+
+mathjax_delim = [['$$','$$'], ['\\(','\\)'], ['\\[','\\]'],
+                 ['\\begin{equation}', '\\end{equation}'],
+                 ['\\begin{equation*}', '\\end{equation*}'],
+                 ['\\begin{align}', '\\end{align}'],
+                 ['\\begin{align*}', '\\end{align*}'],
+                 ['\\begin{eqnarray}', '\\end{eqnarray}'],
+                 ['\\begin{eqnarray*}', '\\end{eqnarray*}'],
+                 ['$', '$']  # must be after $$
+                ]
+
+exports.parse_mathjax = (t) ->
+    # Return list of pairs (i,j) such that t.slice(i,j) is a mathjax, including delimiters.
+    # The delimiters are given in the mathjax_delim list above.
+    v = []
+    i = 0
+    while i < t.length
+        if t.slice(i,i+2) == '\\$'
+            i += 2
+            continue
+        for d in mathjax_delim
+            if t.slice(i,i+d[0].length) == d[0]
+                # a match -- find the close
+                j = i+1
+                while j < t.length and t.slice(j,j+d[1].length) != d[1]
+                    j += 1
+                j += d[1].length
+                v.push([i,j])
+                i = j
+                break
+        i += 1
+    return v
+
+# If you're going to set some innerHTML then mathjax it,
+exports.mathjax_escape = (html) ->
+    return html.replace(/&(?!#?\w+;)/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;")
+
+
+exports.path_is_in_public_paths = (path, paths) ->
+    # Return share object {path:.,desction:.} if (1) path is contained in one
+    # of the given paths (a list of strings), or if (2) path is undefined
+    # then true if paths has length at least 1.
+    if paths.length == 0
+        return false
+    if not path?
+        return paths.length > 0
+    if path.indexOf('../') != -1
+        # just deny any potentially trickiery involving relative path segments (TODO: maybe too restrictive?)
+        return false
+    for p in paths
+        if path == p.path
+            # exact match
+            return p
+        if path.slice(0,p.path.length+1) == p.path + '/'
+            return p
+    return false
+
+
+# encode a UNIX path, which might have # and % in it.
+exports.encode_path = (path) ->
+    path = encodeURI(path)  # doesn't escape # and ?, since they are special for urls (but not unix paths)
+    return path.replace(/#/g,'%23').replace(/\?/g,'%3F')
+
+
+# add a method _call_with_lock to obj, which makes it so it's easy to make it so only
+# one method can be called at a time of an object -- all calls until completion
+# of the first one get an error.
+
+exports.call_lock = (opts) ->
+    opts = exports.defaults opts,
+        obj       : exports.required
+        timeout_s : 30  # lock expire timeout after this many seconds
+
+    obj = opts.obj
+
+    obj._call_lock = () ->
+        obj.__call_lock = true
+        obj.__call_lock_timeout = () ->
+            obj.__call_lock = false
+            delete obj.__call_lock_timeout
+        setTimeout(obj.__call_lock_timeout, opts.timeout_s * 1000)
+
+    obj._call_unlock = () ->
+        if obj.__call_lock_timeout?
+            clearTimeout(obj.__call_lock_timeout)
+            delete obj.__call_lock_timeout
+        obj.__call_lock = false
+
+    obj._call_with_lock = (f, cb) ->
+        if obj.__call_lock
+            cb?("error -- hit call_lock")
+            return
+        obj._call_lock()
+        f (args...) ->
+            obj._call_unlock()
+            cb?(args...)
 
 
 

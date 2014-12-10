@@ -1,3 +1,25 @@
+###############################################################################
+#
+# SageMathCloud: A collaborative web-based interface to Sage, IPython, LaTeX and the Terminal.
+#
+#    Copyright (C) 2014, William Stein
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+###############################################################################
+
+
 ###
 #
 # Library for working with JSON messages for Salvus.
@@ -74,17 +96,29 @@ message
     project_id    : undefined
     info          : undefined
 
-#
-# A period ping message must usually be sent by the client to keep a
-# worksheet/console open, except when worksheet/console is explicitly
-# put in a special (screen-like/nohup) mode.
-#
-# client --> hub
-message
-    event         : 'ping_session'
-    id            : undefined
-    session_uuid  : undefined
 
+
+
+
+message
+    event         : 'project_status'
+    id            : undefined
+    project_id    : undefined
+    status        : undefined
+
+message
+    event         : 'project_get_state'
+    id            : undefined
+    project_id    : undefined
+    state         : undefined
+
+message
+    event         : 'project_get_local_state'
+    id            : undefined
+    project_id    : undefined
+    state         : undefined
+
+#
 
 # client --> hub
 message
@@ -145,6 +179,7 @@ message
     code         : required
     data         : undefined
     session_uuid : undefined
+    cell_id      : undefined  # optional extra useful information about which cells is being executed
     preparse     : true
     allow_cache  : true
 
@@ -156,6 +191,7 @@ message
     stdout       : undefined   # plain text stream
     stderr       : undefined   # error text stream -- colored to indicate an error
     html         : undefined   # arbitrary html stream
+    md           : undefined   # github flavored markdown
     tex          : undefined   # tex/latex stream -- is an object {tex:..., display:...}
     hide         : undefined   # 'input' or 'output'; hide display of given component of cell
     show         : undefined   # 'input' or 'output'; show display of given component of cell
@@ -227,6 +263,63 @@ message
 
 
 
+##################################################
+# Synchronized strings, which are not affiliated
+# with any project.
+##################################################
+
+# client --> hub
+message
+    event      : 'syncstring_get_session'
+    string_id  : required     # new connection to session with this string_id
+    id         : undefined
+
+# hub --> client
+message
+    event      : 'syncstring_session'
+    id         : undefined
+    session_id : required
+    string     : required
+    readonly   : false       # if true, string is read only -- though it can get changed by server
+
+# Client initiated sync.
+# A list of edits that should be applied, along with the
+# last version of edits received before.
+# client <--> hub
+message
+    event            : 'syncstring_diffsync'
+    id               : undefined
+    session_id       : undefined
+    edit_stack       : required
+    last_version_ack : required
+
+# Hub-initiated sync
+# hub <--> client
+message
+    event            : 'syncstring_diffsync2'
+    id               : undefined
+    session_id       : undefined
+    edit_stack       : required
+    last_version_ack : required
+
+# Tell other that there is data ready to be synced:
+# client <--> hub
+message
+    event       : 'syncstring_diffsync_ready'
+    session_id  : undefined
+
+# Hub uses this message to tell client that client should try to
+# sync later, since hub is busy now with some other locking
+# sync operation.
+# hub --> client
+message
+    event      : 'syncstring_diffsync_retry_later'
+    id         : undefined
+
+message
+    event      : 'syncstring_disconnect'
+    id         : undefined
+    session_id : undefined  # gets filled in
 
 
 ############################################
@@ -249,6 +342,16 @@ message
     path         : required    # absolute path
     content      : required
     readonly     : false       # if true, the file must be treated as "read-only" by the client.
+
+
+# turn on or off recording of revisions of a given synchronized editing file.
+# The file will be called
+message
+    event        : 'codemirror_revision_tracking'
+    id           : undefined
+    session_uuid : required
+    enable       : required    # true or false  -- if true, start recording revisions for this file; if false, stop.
+
 
 # A list of edits that should be applied, along with the
 # last version of edits received before.
@@ -281,6 +384,12 @@ message
     id           : undefined
     session_uuid : undefined
 
+# local_hub --> hub --> client
+message
+    event        : 'codemirror_wrote_to_disk'
+    id           : undefined
+    hash         : undefined     # on success, return message contains sha1 hash of what was actually written to disk.
+
 # Replace what is on local_hub by what is on physical disk (will push out a
 # codemirror_change message, so any browser client has a chance to undo this).
 # client --> hub --> local_hub
@@ -310,7 +419,7 @@ message
 message
     event        : 'codemirror_disconnect'
     id           : undefined
-    session_uuid : required
+    session_uuid : undefined  # gets filled in
 
 # Broadcast mesg to all clients connected to this session.
 # This is used for cursors, updating session id's, etc.
@@ -353,20 +462,6 @@ message
     signal       : 2           # 2 = SIGINT, 3 = SIGQUIT, 9 = SIGKILL
 
 
-
-############################################
-# Ping/pong
-#############################################
-# browser --> hub
-message
-    event   : 'ping'
-    id      : undefined
-
-# hub --> browser;   sent in response to a ping
-message
-    event   : 'pong'
-    id      : undefined
-
 ############################################
 # Account Management
 #############################################
@@ -380,6 +475,7 @@ message
     email_address  : required
     password       : required
     agreed_to_terms: required
+    token          : undefined   # only required when token is set.
 
 # hub --> client
 message
@@ -402,6 +498,13 @@ message
     password       : required
     remember_me    : false
 
+
+# hub --> client
+message
+    id             : undefined
+    event          : 'remember_me_failed'
+    reason         : required
+
 # client --> hub
 message
     id             : undefined
@@ -413,12 +516,12 @@ message
 message
     event          : 'signed_in'
     id             : undefined     # message uuid
-    account_id     : required      # uuid of user's account
-    first_name     : required      # user's first name
-    last_name      : required      # user's last name
-    email_address  : required      # address they just signed in using
     remember_me    : required      # true if sign in accomplished via remember_me cookie; otherwise, false.
     hub            : required      # ip address (on vpn) of hub user connected to.
+    account_id     : required      # uuid of user's account
+    email_address  : undefined     # email address they signed in under
+    first_name     : undefined
+    last_name      : undefined
 
 # client --> hub
 message
@@ -512,6 +615,7 @@ exports.restricted_account_settings =
     connect_Github       : undefined
     connect_Google       : undefined
     connect_Dropbox      : undefined
+    groups               : undefined  # only admins can actuall;y change this...
 
 # these can be changed without additional re-typing of the password
 # (of course, user must have somehow logged in):
@@ -538,26 +642,37 @@ exports.account_settings_defaults =
     connect_Github     : ''
     connect_Google     : ''
     connect_Dropbox    : ''
-    autosave           : 180
+    autosave           : 45
+    groups             : undefined
     other_settings     :
-        confirm_close : false
+        confirm_close             : false
+        mask_files                : true
+        default_file_sort         : 'time'
     editor_settings    :
-        strip_trailing_whitespace : true
+        strip_trailing_whitespace : false
+        show_trailing_whitespace  : true
         line_wrapping             : true
         line_numbers              : true
         smart_indent              : true
         electric_chars            : true
         match_brackets            : true
+        auto_close_brackets       : true
+        code_folding              : true
+        match_xml_tags            : true
+        auto_close_xml_tags       : true
+        spaces_instead_of_tabs    : true
+        multiple_cursors          : true
+        track_revisions           : true
         first_line_number         : 1
         indent_unit               : 4
         tab_size                  : 4
         bindings                  : "standard"
         theme                     : "standard"
-        undo_depth                : 200
+        undo_depth                : 300
     terminal           :
-        font_size    : 14
-        color_scheme : 'solarized-light'
-        font         : 'droid-sans-mono'
+        font_size                 : 14
+        color_scheme              : 'default'
+        font                      : 'monospace'
 
 # client <--> hub
 message(
@@ -652,11 +767,48 @@ message
     event       : 'cookies'
     id          : required
     url         : "/cookies"
-    set         : undefined  # name of a cookie to set
     get         : undefined  # name of a cookie to get
+    set         : undefined  # name of a cookie to set
+    value       : undefined  # value to set cookie to
 
 
+######################################################################################
+# Activity loging and notification
+######################################################################################
+#
+# client --> hub to indicate that there was some activity by this user on the given path
+#
+message
+    event       : 'path_activity'
+    id          : undefined
+    project_id  : required
+    path        : required
 
+# Add a comment, e.g., "read" or "seen", to this users activity notification
+# stream for the given path.
+message
+    event       : 'add_comment_to_activity_notification_stream'
+    id          : undefined
+    project_id  : required
+    path        : required
+    comment     : required
+
+message
+    event         : 'activity_notifications'
+    notifications : required
+    update        : false   # if specified then only giving update since the given time
+
+
+# client --> hub
+message
+    event      : "get_notifications_syncdb"
+    id         : undefined
+
+# hub --> client
+message
+    event      : "notifications_syncdb"
+    id         : undefined
+    string_id  : required
 
 ###################################################################################
 #
@@ -786,6 +938,7 @@ message
     event      : 'project_restart'
     id         : undefined
     project_id : required
+
 
 #############################################################################
 
@@ -970,6 +1123,7 @@ message
     event      : 'move_project'
     id         : undefined
     project_id : required
+    target     : undefined   # prefered destination of move
 
 message
     event      : 'project_moved'
@@ -988,6 +1142,19 @@ message
     id         : required
     project_id : required
 
+# client --> hub
+message
+    event      : 'hide_project_from_user'
+    id         : undefined
+    project_id : required
+    account_id : undefined   # owner can optionally hide project from other users
+
+# client --> hub
+message
+    event      : 'unhide_project_from_user'
+    id         : undefined
+    project_id : required
+    account_id : undefined   # owner can optionally unhide project for other users
 
 
 # Get info about a single project (instead of all projects)
@@ -1011,6 +1178,8 @@ message
 message
     event      : 'get_projects'
     id         : undefined
+    hidden     : false
+
 
 # hub --> client
 message
@@ -1152,4 +1321,296 @@ message
     sha1      : required     # the sha-1 hash of the blob that we just processed
     ttl       : undefined    # ttl in seconds of the blob if saved; 0=infinite
     error     : undefined    # if not saving, a message explaining why.
+
+
+# remove the ttls from blobs in the blobstore.
+# client --> hub
+message
+    event     : 'remove_blob_ttls'
+    id        : undefined
+    uuids     : required     # list of sha1 hashes of blobs stored in the blobstore
+
+message
+    event      : 'storage'
+    action     : required    # open, save, snapshot, latest_snapshot, close
+    project_id : undefined
+    param      : undefined
+    id         : undefined
+
+message
+    event      : 'projects_running_on_server'
+    id         : undefined
+    projects   : undefined   # for response
+
+
+
+###########################################################
+#
+# Direct messaging between browser client and local_hub,
+# forwarded on by global hub after ensuring write access.
+#
+###########################################################
+message
+    event          : 'local_hub'
+    project_id     : required
+    timeout        : undefined
+    id             : undefined
+    multi_response : false
+    message        : required   # arbitrary message
+
+
+###########################################################
+#
+# Copy a path from one project to another.
+#
+###########################################################
+message
+    event             : 'copy_path_between_projects'
+    id                : undefined
+    src_project_id    : required    # id of source project
+    src_path          : required    # relative path of director or file in the source project
+    target_project_id : required    # if of target project
+    target_path       : undefined   # defaults to src_path
+    overwrite_newer   : false       # overwrite newer versions of file at destination (destructive)
+    delete_missing    : false       # delete files in dest that are missing from source (destructive)
+    timeout           : undefined   # how long to wait for the copy to complete before reporting "error" (though it could still succeed)
+
+
+
+
+
+##########################################################
+#
+# Tasks (ALL DEPRECATED -- delete all this)
+#
+##########################################################
+
+message
+    event        : 'create_task'
+    task_list_id : required
+    title        : "No title"
+    position     : 0
+    project_id   : undefined    # give this if task list usage is authenticated via project_id (otherwise account_id used)
+    id           : undefined
+
+message
+    event        : 'task_created'
+    task_id      : required
+    id           : undefined
+
+message
+    event        : 'edit_task'
+    task_list_id : required
+    task_id      : required
+    project_id   : undefined    # give this if task list usage is authenticated via project_id
+    id           : undefined
+    title        : undefined
+    position     : undefined
+    done         : undefined
+    data         : undefined
+    sub_task_list_id : undefined   # a list of subtasks
+    deleted          : undefined
+
+message
+    event        : 'create_task_list'
+    owners       : required    # list of project_id's or account_id's that are allowed to edit this task list.
+    id           : undefined
+
+message
+    event        : 'task_list_created'
+    task_list_id : required
+    id           : undefined
+
+message
+    event        : 'edit_task_list'
+    task_list_id : required
+    data         : undefined
+    project_id   : undefined    # give this if task list usage is authenticated via project_id
+    deleted      : undefined
+    id           : undefined
+
+message
+    event        : 'get_task_list'
+    task_list_id : required
+    columns      : undefined
+    include_deleted : false
+    project_id   : undefined    # give this if task list usage is authenticated via project_id
+    id           : undefined
+
+message
+    event        : 'task_list_resp'
+    id           : undefined
+    task_list    : required     # list of all tasks
+
+message
+    event        : 'get_task_list_last_edited'
+    task_list_id : required
+    project_id   : undefined    # give this if task list usage is authenticated via project_id
+    id           : undefined
+
+message
+    event        : 'set_project_task_list'
+    task_list_id : required
+    project_id   : required
+    id           : undefined
+
+
+
+# hub --> connected clients who would care -- implementing this will require a message queue (like nanomsg)
+message
+    event        : 'sync_task_list'
+    task_list_id : required
+    task_id      : required
+    task         : undefined    # if task is created or edited this is given with new version; if deleted this is undefined
+
+#############################################
+# Admin Functionality
+#############################################
+
+# client --> hub;  will result in an error if the user is not in the admin group.
+message
+    event        : 'project_set_quota'
+    id           : undefined
+    project_id   : required     # the id of the project's id to set.
+    memory       : undefined    # RAM in gigabytes
+    cpu_shares   : undefined    # fair sharing with everybody is 256, not 1 !!!
+    cores        : undefined    # integer max number of cores user can use (>=1)
+    disk         : undefined    # disk quota in megabytes
+    scratch      : undefined    # disk quota in megabytes
+    inode        : undefined    # not actually used, since ZFS doesn't have an inode quota
+    mintime      : undefined    # time in **seconds** until idle projects are terminated
+    login_shell  : undefined    # not used right now (??)
+    network      : undefined    # true or false; if true, full access to outside networ
+
+# client --> hub: admins can set a token that anybody creating an account must
+# know to be allowed to create an account.  For now there is just one global token.
+message
+    event        : 'set_account_creation_token'
+    id           : undefined
+    token        : required     # a string
+
+# client <--> hub
+message
+    event        : 'get_account_creation_token'
+    id           : undefined
+    token        : undefined  # comes back in here
+
+
+
+#############################################
+# Printing Files
+#############################################
+message
+    event        : "print_to_pdf"
+    id           : undefined
+    path         : required
+    options      : undefined
+
+message
+    event        : 'printed_to_pdf'
+    id           : undefined
+    path         : required
+
+message
+    event : 'ping'
+    id    : undefined
+
+message
+    event : 'pong'
+    id    : undefined
+
+
+
+#############################################
+# Reading listings and files from projects
+# without invoking the project server and
+# write auth requirement.  Instead the given
+# path in the project must be public.  These
+# functions don't even assume the client has
+# logged in.
+#############################################
+
+# return a JSON object with all data that is
+# meant to be publically available about this project,
+# who owns it, the title/description, etc.
+message
+    event         : 'public_get_project_info'
+    id            : undefined
+    project_id    : required
+
+message
+    event         : 'public_project_info'
+    id            : undefined
+    info          : required
+
+# public request of listing of files in a project.
+message
+    event         : 'public_get_directory_listing'
+    id            : undefined
+    project_id    : required
+    path          : required
+    hidden        : false   # show hidden files
+    time          : false   # sort by timestamp, with newest first?
+    start         : 0
+    limit         : -1
+
+message
+    event         : 'public_directory_listing'
+    id            : undefined
+    result        : required
+
+# public request of contents of a text file in project
+message
+    event         : 'public_get_text_file'
+    id            : undefined
+    project_id    : required
+    path          : required
+
+message
+    event         : 'public_text_file_contents'
+    id            : undefined
+    data          : required
+
+message
+    event         : 'publish_path'
+    id            : undefined
+    project_id    : required
+    path          : required
+    description   : required
+
+message
+    event         : 'unpublish_path'
+    id            : undefined
+    project_id    : required
+    path          : required
+
+message
+    event         : 'get_public_paths'
+    id            : undefined
+    project_id    : required
+
+message
+    event         : 'public_paths'
+    id            : undefined
+    paths         : required   # list of {path:?, description:?}
+
+
+message
+    event             : 'copy_public_path_between_projects'
+    id                : undefined
+    src_project_id    : required    # id of source project
+    src_path          : required    # relative path of director or file in the source project
+    target_project_id : required    # if of target project
+    target_path       : undefined   # defaults to src_path
+    overwrite_newer   : false       # overwrite newer versions of file at destination (destructive)
+    delete_missing    : false       # delete files in dest that are missing from source (destructive)
+    timeout           : undefined   # how long to wait for the copy to complete before reporting "error" (though it could still succeed)
+
+
+
+
+
+
+
+
 

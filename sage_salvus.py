@@ -13,7 +13,11 @@
 #########################################################################################
 
 
-import copy, os, sys
+import copy, os, sys, types
+
+# This reduces a lot of confusion for Sage worksheets -- people expect
+# to be able to import from the current working directory.
+sys.path.append('.')
 
 salvus = None
 
@@ -1184,7 +1188,7 @@ class HTML:
 html = HTML()
 html.iframe = _html.iframe  # written in a way that works fine
 
-def coffeescript(s=None, once=True):
+def coffeescript(s=None, once=False):
     """
     Execute code using CoffeeScript.
 
@@ -1209,13 +1213,34 @@ def coffeescript(s=None, once=True):
          %coffeescript(once=False)
          console.log("hi")
 
+
+    EXTRA FUNCTIONALITY:
+
+    When executing code, a function called print is defined, and objects cell and worksheet.::
+
+         print(1,2,'foo','bar')  -- displays the inputs in the output cell
+
+         cell -- has attributes cell.output (the html output box) and cell.cell_id
+
+         worksheet -- has attributes project_page and editor, and methods interrupt, kill, and
+
+            execute_code: (opts) =>
+                opts = defaults opts,
+                    code     : required
+                    data     : undefined
+                    preparse : true
+                    cb       : undefined
+
+    OPTIMIZATION: When used alone as a cell decorating in a Sage worksheet
+    with once=False (the default), rendering is done entirely client side,
+    which is much faster, not requiring a round-trip to the server.
     """
     if s is None:
         return lambda s : salvus.javascript(s, once=once, coffeescript=True)
     else:
-        return salvus.javascript(s, coffeescript=True)
+        return salvus.javascript(s, coffeescript=True, once=once)
 
-def javascript(s=None, once=True):
+def javascript(s=None, once=False):
     """
     Execute code using JavaScript.
 
@@ -1231,8 +1256,8 @@ def javascript(s=None, once=True):
     You may either pass in a string or use this as a cell decorator,
     i.e., put %javascript at the top of a cell.
 
-    If you set once=False, the code will be executed every time the output of the cell is rendered, e.g.,
-    on load, like with %auto::
+    If once=False (the default), the code will be executed every time the output of the
+    cell is rendered, e.g., on load, like with %auto::
 
          javascript('.. some code ', once=False)
 
@@ -1243,11 +1268,45 @@ def javascript(s=None, once=True):
 
     WARNING: If once=True, then this code is likely to get executed *before* the rest
     of the output for this cell has been rendered by the client.
+
+         javascript('console.log("HI")', once=False)
+
+    EXTRA FUNCTIONALITY:
+
+    When executing code, a function called print is defined, and objects cell and worksheet.::
+
+         print(1,2,'foo','bar')  -- displays the inputs in the output cell
+
+         cell -- has attributes cell.output (the html output box) and cell.cell_id
+
+         worksheet -- has attributes project_page and editor, and methods interrupt, kill, and
+
+            execute_code: (opts) =>
+                opts = defaults opts,
+                    code     : required
+                    data     : undefined
+                    preparse : true
+                    cb       : undefined
+
+    This example illustrates using worksheet.execute_code::
+
+        %coffeescript
+        for i in [500..505]
+            worksheet.execute_code
+                code : "i=salvus.data['i']; i, factor(i)"
+                data : {i:i}
+                cb   : (mesg) ->
+                    if mesg.stdout then print(mesg.stdout)
+                    if mesg.stderr then print(mesg.stderr)
+
+    OPTIMIZATION: When used alone as a cell decorating in a Sage worksheet
+    with once=False (the default), rendering is done entirely client side,
+    which is much faster, not requiring a round-trip to the server.
     """
     if s is None:
         return lambda s : salvus.javascript(s, once=once)
     else:
-        return salvus.javascript(s)
+        return salvus.javascript(s, once=once)
 
 javascript_exec_doc = r"""
 
@@ -1353,7 +1412,7 @@ class Time:
 
     def after(self, code):
         from sage.all import walltime, cputime
-        print "CPU time: %.2f s, Wall time: %.2f s"%(walltime(self._start_walltime), cputime(self._start_cputime))
+        print "CPU time: %.2f s, Wall time: %.2f s"%( cputime(self._start_cputime), walltime(self._start_walltime))
         self._start_cputime = self._start_walltime = None
 
     def __call__(self, code):
@@ -1393,14 +1452,18 @@ def file(path):
 
 def timeit(*args, **kwds):
     """
-    Time execution of a command or block of commands.  This command has been
-    enhanced for Salvus so you may use it as a block decorator as well, e.g.,
+    Time execution of a command or block of commands.
+
+    This command has been enhanced for Salvus so you may use it as
+    a block decorator as well, e.g.,
 
         %timeit 2+3
 
     and
 
         %timeit(number=10, preparse=False)  2^3
+
+        %timeit(number=10, seconds=True)  2^3
 
     and
 
@@ -1411,10 +1474,10 @@ def timeit(*args, **kwds):
     Here is the original docstring for timeit:
 
     """
-    def go(code, **kwds):
+    def go(code):
         print sage.misc.sage_timeit.sage_timeit(code, globals_dict=salvus.namespace, **kwds)
     if len(args) == 0:
-        return lambda code : go(code, **kwds)
+        return lambda code : go(code)
     else:
         go(*args)
 
@@ -1530,8 +1593,6 @@ def cython(code=None, **kwds):
     You can pass options to cython by typing "%cython(... var=value...)" instead.
 
     This is a wrapper around Sage's cython function, whose docstring is:
-
-
     """
     if code is None:
         return lambda code: cython(code, **kwds)
@@ -1559,12 +1620,12 @@ def cython(code=None, **kwds):
     files = os.listdir(path)
     html_filename = None
     for n in files:
-        ext = os.path.splitext(n)[1]
-        if ext.startswith('.html'):
+        base, ext = os.path.splitext(n)
+        if ext.startswith('.html') and '_pyx_' in base:
             html_filename = os.path.join(path, n)
     if html_filename is not None:
-        html_url = salvus.file(html_filename, show=False)
-        salvus.html("<a href='%s' target='_new' class='btn btn-small '>Show auto-generated code &nbsp;<i class='fa fa-external-link'></i></a>"%html_url)
+        html_url = salvus.file(html_filename, raw=True, show=False)
+        salvus.html("<a href='%s' target='_new' class='btn btn-small' style='margin-top: 1ex'>Auto-generated code... &nbsp;<i class='fa fa-external-link'></i></a>"%html_url)
 
 cython.__doc__ += sage.misc.cython.cython.__doc__
 
@@ -1726,6 +1787,125 @@ def ruby(code):
     """
     script('sage-native-execute ruby')(code)
 
+
+def fortran(x, library_paths=[], libraries=[], verbose=False):
+    """
+    Compile Fortran code and make it available to use.
+
+    INPUT:
+
+        - x -- a string containing code
+
+    Use this as a decorator.   For example, put this in a cell and evaluate it::
+
+        %fortran
+
+        C FILE: FIB1.F
+              SUBROUTINE FIB(A,N)
+        C
+        C     CALCULATE FIRST N FIBONACCI NUMBERS
+        C
+              INTEGER N
+              REAL*8 A(N)
+              DO I=1,N
+                 IF (I.EQ.1) THEN
+                    A(I) = 0.0D0
+                 ELSEIF (I.EQ.2) THEN
+                    A(I) = 1.0D0
+                 ELSE
+                    A(I) = A(I-1) + A(I-2)
+                 ENDIF
+              ENDDO
+              END
+        C END FILE FIB1.F
+
+
+    In the next cell, evaluate this::
+
+        import numpy
+        n = numpy.array(range(10),dtype=float)
+        fib(n,int(10))
+        n
+
+    This will produce this output: array([  0.,   1.,   1.,   2.,   3.,   5.,   8.,  13.,  21.,  34.])
+    """
+    import __builtin__
+    from sage.misc.temporary_file import tmp_dir
+    if len(x.splitlines()) == 1 and os.path.exists(x):
+        filename = x
+        x = open(x).read()
+        if filename.lower().endswith('.f90'):
+            x = '!f90\n' + x
+
+    from numpy import f2py
+    from random import randint
+
+    # Create everything in a temporary directory
+    mytmpdir = tmp_dir()
+
+    try:
+        old_cwd = os.getcwd()
+        os.chdir(mytmpdir)
+
+        old_import_path = os.sys.path
+        os.sys.path.append(mytmpdir)
+
+        name = "fortran_module_%s"%randint(0,2**64)  # Python module name
+        # if the first line has !f90 as a comment, gfortran will
+        # treat it as Fortran 90 code
+        if x.startswith('!f90'):
+            fortran_file = name + '.f90'
+        else:
+            fortran_file = name + '.f'
+
+        s_lib_path = ""
+        s_lib = ""
+        for s in library_paths:
+            s_lib_path = s_lib_path + "-L%s "
+
+        for s in libraries:
+            s_lib = s_lib + "-l%s "%s
+
+        log = name + ".log"
+        extra_args = '--quiet --f77exec=sage-inline-fortran --f90exec=sage-inline-fortran %s %s >"%s" 2>&1'%(
+            s_lib_path, s_lib, log)
+
+        f2py.compile(x, name, extra_args = extra_args, source_fn=fortran_file)
+        log_string = open(log).read()
+
+        # f2py.compile() doesn't raise any exception if it fails.
+        # So we manually check whether the compiled file exists.
+        # NOTE: the .so extension is used expect on Cygwin,
+        # that is even on OS X where .dylib might be expected.
+        soname = name
+        uname = os.uname()[0].lower()
+        if uname[:6] == "cygwin":
+            soname += '.dll'
+        else:
+            soname += '.so'
+        if not os.path.isfile(soname):
+            raise RuntimeError("failed to compile Fortran code:\n" + log_string)
+
+        if verbose:
+            print log_string
+
+        m = __builtin__.__import__(name)
+
+    finally:
+        os.sys.path = old_import_path
+        os.chdir(old_cwd)
+        try:
+            import shutil
+            shutil.rmtree(mytmpdir)
+        except OSError:
+            # This can fail for example over NFS
+            pass
+
+    for k, x in m.__dict__.iteritems():
+        if k[0] != '_':
+            salvus.namespace[k] = x
+
+
 def sh(code):
     """
     Run a bash script in Salvus.
@@ -1761,7 +1941,7 @@ def sh(code):
 
 import sage.interfaces.r
 def r_eval0(*args, **kwds):
-    return sage.interfaces.r.R.eval(sage.interfaces.r.r, *args, **kwds).strip()
+    return sage.interfaces.r.R.eval(sage.interfaces.r.r, *args, **kwds).strip('\n')
 
 r_dev_on = False
 def r_eval(code, *args, **kwds):
@@ -1791,8 +1971,8 @@ def r_eval(code, *args, **kwds):
         return r_eval0(code, *args, **kwds)
     try:
         r_dev_on = True
-        tmp = '/tmp/' + uuid() + '.png'
-        r_eval0("png(filename='%s')"%tmp)
+        tmp = '/tmp/' + uuid() + '.svg'
+        r_eval0("svg(filename='%s')"%tmp)
         s = r_eval0(code, *args, **kwds)
         r_eval0('dev.off()')
         return s
@@ -1901,6 +2081,10 @@ class Fork(object):
     The %fork block decorator evaluates its code in a forked subprocess
     that does not block the main process.
 
+    You may still use the @fork function decorator from Sage, as usual,
+    to run a function in a subprocess.  Type "sage.all.fork?" to see
+    the help for the @fork decorator.
+
     WARNING: This is highly experimental and possibly flakie. Use with
     caution.
 
@@ -1928,6 +2112,11 @@ class Fork(object):
         return dict(self._children)
 
     def __call__(self, s):
+
+        if isinstance(s, types.FunctionType): # check for decorator usage
+            import sage.parallel.decorate
+            return sage.parallel.decorate.fork(s)
+
         salvus._done = False
 
         id = salvus._id
@@ -2004,6 +2193,21 @@ def show_animation(obj, **kwds):
     os.unlink(t)
 
 def show_2d_plot_using_matplotlib(obj, svg, **kwds):
+    if isinstance(obj, matplotlib.image.AxesImage):
+        # The result of imshow, e.g.,
+        #
+        #     from matplotlib import numpy, pyplot
+        #     pyplot.imshow(numpy.random.random_integers(255, size=(100,100,3)))
+        #
+        t = tmp_filename(ext='.png')
+        obj.write_png(t)
+        salvus.file(t)
+        os.unlink(t)
+        return
+
+    if isinstance(obj, matplotlib.axes.Axes):
+        obj = obj.get_figure()
+
     if 'events' in kwds:
         from graphics import InteractiveGraphics
         ig = InteractiveGraphics(obj, **kwds['events'])
@@ -2030,16 +2234,21 @@ def show_3d_plot_using_tachyon(obj, **kwds):
 from sage.plot.graphics import Graphics, GraphicsArray
 from sage.plot.plot3d.base import Graphics3d
 
-def show(obj, svg=False, **kwds):
+def show(obj, svg=True, **kwds):
     """
     Show a 2d or 3d graphics object, animation, or matplotlib figure, or show an
     expression typeset nicely using LaTeX.
 
-       - display: (default: True); if true use display math for expression (big and centered).
+       - display: (default: True); if True, use display math for expression (big and centered).
 
-       - svg: (default False); if True, render graphics using svg.  This is False by default,
-         since at least Google Chrome mis-renders this as empty:
-              line([(10, 0), (10, 15)], color='black').show(svg=True)
+       - svg: (default: True); if True, render graphics using svg (otherwise use png)
+
+       - renderer: (default: 'webgl'); for 3d graphics
+           - 'webgl' (fastest) using hardware accelerated 3d;
+           - 'canvas' (slower) using a 2d canvas, but may work better with transparency;
+           - 'tachyon' -- a ray traced static image.
+
+       - spin: (default: False); spins 3d plot, with number determining speed (requires mouse over plot)
 
        - events: if given, {'click':foo, 'mousemove':bar}; each time the user clicks,
          the function foo is called with a 2-tuple (x,y) where they clicked.  Similarly
@@ -2071,7 +2280,7 @@ def show(obj, svg=False, **kwds):
             show(g, events={'click':c, 'mousemove':h}, svg=True, gridlines='major', ymin=ymin, ymax=ymax)
     """
     import graphics
-    if isinstance(obj, (Graphics, GraphicsArray, matplotlib.figure.Figure)):
+    if isinstance(obj, (Graphics, GraphicsArray, matplotlib.figure.Figure, matplotlib.axes.Axes, matplotlib.image.AxesImage)):
         show_2d_plot_using_matplotlib(obj, svg=svg, **kwds)
     elif isinstance(obj, Animation):
         show_animation(obj, **kwds)
@@ -2079,7 +2288,8 @@ def show(obj, svg=False, **kwds):
         if kwds.get('viewer') == 'tachyon':
             show_3d_plot_using_tachyon(obj, **kwds)
         else:
-            graphics.show_3d_plot_using_threejs(obj, **kwds)
+            salvus.threed(obj, **kwds)
+            # graphics.show_3d_plot_using_threejs(obj, **kwds)
     else:
         if 'display' not in kwds:
             kwds['display'] = True
@@ -2136,9 +2346,10 @@ def hideall(code=None):
 ##########################################################
 class Exercise:
     def __init__(self, question, answer, check=None, hints=None):
-        import sage.all, sage.matrix.all
+        import sage.all
+        from sage.structure.element import is_Matrix
         if not (isinstance(answer, (tuple, list)) and len(answer) == 2):
-            if sage.matrix.all.is_Matrix(answer):
+            if is_Matrix(answer):
                 default = sage.all.parent(answer)(0)
             else:
                 default = ''
@@ -2410,19 +2621,8 @@ def dynamic(*args, **kwds):
 
 
 import sage.all
-def var(*args, **kwds):
-    """
-    Create symbolic variables and inject them into the global namespace.
 
-    NOTE: In SageCloud, you can use var as a line decorator::
-
-        %var x
-        %var a,b,theta          # separate with commas
-        %var x y z t            # separate with spaces
-
-    Here is the docstring for var in Sage:
-
-    """
+def var0(*args, **kwds):
     if len(args)==1:
         name = args[0]
     else:
@@ -2436,7 +2636,44 @@ def var(*args, **kwds):
         G[repr(v)] = v
     return v
 
+def var(*args, **kwds):
+    """
+    Create symbolic variables and inject them into the global namespace.
+
+    NOTE: In SageCloud, you can use var as a line decorator::
+
+        %var x
+        %var a,b,theta          # separate with commas
+        %var x y z t            # separate with spaces
+
+    Use latex_name to customizing how the variables is typeset:
+
+        var1 = var('var1', latex_name=r'\sigma^2_1')
+        show(e^(var1**2))
+
+    Multicolored variables made using the %var line decorator:
+
+        %var(latex_name=r"\color{green}{\theta}") theta
+        %var(latex_name=r"\color{red}{S_{u,i}}") sui
+        show(expand((sui + x^3 + theta)^2))
+
+
+
+    Here is the docstring for var in Sage:
+
+    """
+    if 'latex_name' in kwds:
+        # wrap with braces -- sage should probably do this, but whatever.
+        kwds['latex_name'] = '{%s}'%kwds['latex_name']
+    if len(args) > 0:
+        return var0(*args, **kwds)
+    else:
+        def f(s):
+            return var0(s, *args, **kwds)
+        return f
+
 var.__doc__ += sage.all.var.__doc__
+
 
 
 #############################################
@@ -2494,6 +2731,7 @@ def restore(vars=None):
 
 restore.__doc__ += sage.misc.reset.restore.__doc__
 
+# NOTE: this is not used anymore
 def md2html(s):
     from markdown2Mathjax import sanitizeInput, reconstructMath
     from markdown2 import markdown
@@ -2519,6 +2757,7 @@ def md2html(s):
 
     return markedDownText
 
+# NOTE: this is not used anymore
 class Markdown(object):
     r"""
     Cell mode that renders everything after %md as markdown and hides the input by default.
@@ -2570,8 +2809,115 @@ class Markdown(object):
             hide = self._hide
         html(md2html(s),hide=hide)
 
-md = Markdown()
+# not used
+#md = Markdown()
 
+# Instead... of the above server-side markdown, we use this client-side markdown.
+
+class Marked(object):
+    r"""
+    Cell mode that renders everything after %md as Github flavored
+    markdown [1] with mathjax and hides the input by default.
+
+    [1] https://help.github.com/articles/github-flavored-markdown
+
+    The rendering is done client-side using marked and mathjax.
+
+    EXAMPLES::
+
+        ---
+        %md
+        # A Title
+
+        ## A subheading
+
+        ---
+        %md(hide=False)
+        # A title
+
+        - a list
+
+        ---
+        md("# A title", hide=False)
+
+
+        ---
+        %md(hide=False) `some code`
+
+    """
+    def __init__(self, hide=True):
+        self._hide = hide
+
+    def __call__(self, *args, **kwds):
+        if len(kwds) > 0 and len(args) == 0:
+            return Marked(**kwds)
+        if len(args) > 0:
+            self._render(args[0], **kwds)
+
+    def _render(self, s, hide=None):
+        if hide is None:
+            hide = self._hide
+        if hide:
+            salvus.hide('input')
+        salvus.md(s)
+
+md = Marked()
+
+#####
+# Generic Pandoc cell decorator
+
+def pandoc(fmt, doc=None, hide=True):
+    """
+    INPUT:
+
+    - fmt -- one of 'docbook', 'haddock', 'html', 'json', 'latex', 'markdown', 'markdown_github',
+                 'markdown_mmd', 'markdown_phpextra', 'markdown_strict', 'mediawiki',
+                 'native', 'opml', 'rst', 'textile'
+
+    - doc -- a string in the given format
+
+    OUTPUT:
+
+    - Called directly, you get the HTML rendered version of doc as a string.
+
+    - If you use this as a cell decorator, it displays the HTML output, e.g.,
+
+        %pandoc('mediawiki')
+        * ''Unordered lists'' are easy to do:
+        ** Start every line with a star.
+        *** More stars indicate a deeper level.
+
+    """
+    if doc is None:
+        return lambda x : html(pandoc(fmt, x), hide=hide) if x is not None else ''
+    import subprocess
+    p = subprocess.Popen(['pandoc', '-f', fmt,  '--mathjax'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+    if not isinstance(doc, unicode):
+        doc = unicode(doc, 'utf8')
+    p.stdin.write(doc.encode('UTF-8'))
+    p.stdin.close()
+    err = p.stderr.read()
+    if err:
+        raise RuntimeError(err)
+    return p.stdout.read()
+
+
+def wiki(doc=None, hide=True):
+    """
+    Mediawiki markup cell decorator.   E.g.,
+
+    EXAMPLE::
+
+        %wiki(hide=False)
+        * ''Unordered lists'' and math like $x^3 - y^2$ are both easy
+        ** Start every line with a star.
+        *** More stars indicate a deeper level.    """
+    if doc is None:
+        return lambda doc: wiki(doc=doc, hide=hide) if doc else ''
+    html(pandoc('mediawiki', doc=doc), hide=hide)
+
+
+######
 
 def load_html_resource(filename):
     fl = filename.lower()
@@ -2635,6 +2981,8 @@ def load(*args, **kwds):
         load('a.css', 'a.js', 'a.coffee', 'a.html')
         load('a.css a.js a.coffee a.html')
         load(['a.css', 'a.js', 'a.coffee', 'a.html'])
+
+    ALIAS: %runfile is the same as %load, for compatibility with IPython.
     """
     if len(args) == 1:
         if isinstance(args[0], (unicode,str)):
@@ -2682,13 +3030,22 @@ def load(*args, **kwds):
                 del salvus.namespace[t]
             except: pass
 
-
+# add alias, due to IPython.
+runfile = load
 
 ## Make it so pylab (matplotlib) figures display, at least using pylab.show
 import pylab
-def _show_pylab():
+def _show_pylab(svg=True):
+    """
+    Show a Pylab plot in a Sage Worksheet.
+
+    INPUTS:
+
+       - svg -- boolean (default: True); if True use an svg; otherwise, use a png.
+    """
     try:
-        filename = uuid()+'.png'
+        ext = '.svg' if svg else '.png'
+        filename = uuid() + ext
         pylab.savefig(filename)
         salvus.file(filename)
     finally:
@@ -2701,9 +3058,17 @@ pylab.show = _show_pylab
 matplotlib.figure.Figure.show = show
 
 import matplotlib.pyplot
-def _show_pyplot():
+def _show_pyplot(svg=True):
+    """
+    Show a Pylab plot in a Sage Worksheet.
+
+    INPUTS:
+
+       - svg -- boolean (default: True); if True use an svg; otherwise, use a png.
+    """
     try:
-        filename = uuid()+'.png'
+        ext = '.svg' if svg else '.png'
+        filename = uuid() + ext
         matplotlib.pyplot.savefig(filename)
         salvus.file(filename)
     finally:
@@ -2719,7 +3084,7 @@ matplotlib.pyplot.show = _show_pyplot
 _system_sys_displayhook = sys.displayhook
 
 def displayhook(obj):
-    if isinstance(obj, (Graphics3d, Graphics, GraphicsArray, matplotlib.figure.Figure, Animation)):
+    if isinstance(obj, (Graphics3d, Graphics, GraphicsArray, matplotlib.figure.Figure, matplotlib.axes.Axes, matplotlib.image.AxesImage, Animation)):
         show(obj)
     else:
         _system_sys_displayhook(obj)
@@ -2864,3 +3229,111 @@ def sage_chat(chatroom=None, height="258px"):
     <iframe src="/static/webrtc/index.html?%s" height="%s" width="100%%"></iframe>
     """%(chatroom, height), hide=False)
 
+
+########################################################
+# Documentation of magics
+########################################################
+def magics(dummy=None):
+    """
+    Type %magics to print all SageMathCloud magic commands or
+    magics() to get a list of them.
+
+    To use a magic command, either type
+
+        %command <a line of code>
+
+    or
+
+        %command
+        [rest of cell]
+
+    Create your own magic command by dedefining a function that takes
+    a string as input and outputs a string. (Yes, it is that simple.)
+    """
+    import re
+    magic_cmds = set()
+    for s in open(os.path.realpath(__file__), 'r').xreadlines():
+        s = s.strip()
+        if s.startswith('%'):
+            magic_cmds.add(re.findall(r'%[a-zA-Z]+', s)[0])
+    magic_cmds.discard('%s')
+    for k,v in sage.interfaces.all.__dict__.iteritems():
+        if isinstance(v, sage.interfaces.expect.Expect):
+            magic_cmds.add('%'+k)
+    magic_cmds.update(['%cython', '%time', '%magics', '%auto', '%hide', '%hideall',
+                       '%fork', '%runfile', '%default_mode', '%typeset_mode'])
+    v = list(sorted(magic_cmds))
+    if dummy is None:
+        return v
+    else:
+        for s in v:
+            print(s)
+
+########################################################
+# Go magic
+########################################################
+def go(s):
+    """
+    Run a go program.  For example,
+
+        %go
+        func main() { fmt.Println("Hello World") }
+
+    You can set the whole worksheet to be in go mode by typing
+
+        %default_mode go
+
+    NOTES:
+
+    - The official Go tutorial as a long Sage Worksheet is available here:
+
+        https://github.com/sagemath/cloud-examples/tree/master/go
+
+    - There is no relation between one cell and the next.  Each is a separate
+      self-contained go program, which gets compiled and run, with the only
+      side effects being changes to the filesystem.  The program itself is
+      stored in a random file that is deleted after it is run.
+
+    - The %go command automatically adds 'package main' and 'import "fmt"'
+      (if fmt. is used) to the top of the program, since the assumption
+      is that you're using %go interactively.
+    """
+    import uuid
+    name = str(uuid.uuid4())
+    if 'fmt.' in s and '"fmt"' not in s and "'fmt'" not in s:
+        s = 'import "fmt"\n' + s
+    if 'package main' not in s:
+        s = 'package main\n' + s
+    try:
+        open(name +'.go','w').write(s.encode("UTF-8"))
+        (child_stdin, child_stdout, child_stderr) = os.popen3('go build %s.go'%name)
+        err = child_stderr.read()
+        sys.stdout.write(child_stdout.read())
+        sys.stderr.write(err)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if not os.path.exists(name): # failed to produce executable
+            return
+        (child_stdin, child_stdout, child_stderr) = os.popen3("./" + name)
+        sys.stdout.write(child_stdout.read())
+        sys.stderr.write(child_stderr.read())
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        try:
+            os.unlink(name+'.go')
+        except:
+            pass
+        try:
+            os.unlink(name)
+        except:
+            pass
+
+
+
+# Julia pexepect interface support
+import julia
+import sage.interfaces
+sage.interfaces.julia = julia # the module
+julia = julia.julia # specific instance
+sage.interfaces.all.julia = julia
