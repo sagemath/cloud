@@ -1922,6 +1922,7 @@ print_sagews = (opts) ->
         date       : required
         contents   : required
         extra_data : undefined   # extra data that is useful for displaying certain things in the worksheet.
+        timeout    : 90
         cb         : required
 
     extra_data_file = undefined
@@ -1942,6 +1943,7 @@ print_sagews = (opts) ->
                 args        : args
                 err_on_exit : false
                 bash        : false
+                timeout     : opts.timeout
                 cb          : cb
 
         ], (err) =>
@@ -1969,6 +1971,7 @@ print_to_pdf = (socket, mesg) ->
                         date       : mesg.options.date
                         contents   : mesg.options.contents
                         extra_data : mesg.options.extra_data
+                        timeout    : mesg.options.timeout
                         cb         : cb
                 else
                     cb("unable to print file of type '#{ext}'")
@@ -2286,7 +2289,7 @@ program.usage('[start/stop/restart/status] [options]')
     .option('--pidfile [string]', 'store pid in this file', String, abspath("#{DATA}/local_hub.pid"))
     .option('--logfile [string]', 'write log to this file', String, abspath("#{DATA}/local_hub.log"))
     .option('--forever_logfile [string]', 'write forever log to this file', String, abspath("#{DATA}/forever_local_hub.log"))
-    .option('--debug [string]', 'logging debug level (default: "" -- no debugging output)', String, 'debug')
+    .option('--debug [string]', 'logging debug level (default: "debug"); "" for no debugging output)', String, 'debug')
     .option('--timeout [number]', 'kill all processes if there is no activity for this many *seconds* (use 0 to disable, which is the default)', Number, 0)
     .parse(process.argv)
 

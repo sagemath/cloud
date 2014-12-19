@@ -203,7 +203,7 @@ class ProjectPage
         # sends a message to the hub.
         that = @
         @container.find(".project-project_title").blur () ->
-            new_title = $(@).html().trim()
+            new_title = $(@).text().trim()
             if new_title != that.project.title
                 if new_title == ""
                     new_title = "No title"
@@ -224,7 +224,7 @@ class ProjectPage
                             that.update_topbar()
 
         @container.find(".project-project_description").blur () ->
-            new_desc = $(@).html().trim()
+            new_desc = $(@).text().trim()
             if new_desc != that.project.description
                 if new_desc == ""
                     new_desc = "No description"
@@ -2270,7 +2270,7 @@ class ProjectPage
                     path       : '.'
                     cb         : (err, output) =>
                         if err
-                            alert_message(type:"error", message:"Error moving #{new_src} to #{new_dest} -- #{output.stderr}")
+                            alert_message(type:"error", message:"Error moving #{new_src} to #{new_dest} -- #{err}")
                         else
                             alert_message(type:"success", message:"Successfully moved #{new_src} to #{new_dest}")
                             if path == @current_pathname()

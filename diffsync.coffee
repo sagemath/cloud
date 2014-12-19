@@ -69,8 +69,8 @@ dmp = new diff_match_patch()
 dmp.Diff_Timeout = 0.2
 
 
-#dmp.Match_Threshold = 0.3   # make matching more conservative
-#dmp.Patch_DeleteThreshold = 0.3  # make deleting more conservative
+dmp.Match_Threshold = 0.3   # make matching more conservative
+dmp.Patch_DeleteThreshold = 0.3  # make deleting more conservative
 
 
 exports.dmp = dmp
@@ -696,7 +696,7 @@ class exports.SynchronizedDB_DiffSyncWrapper extends EventEmitter
 
 
 class exports.SynchronizedDB extends EventEmitter
-    constructor: (@_doc, @to_json, @from_json) ->
+    constructor: (@_doc, @to_json, @from_json, @max_len) ->
         if not @to_json?
             @to_json = misc.to_json
         if not @from_json?
@@ -725,7 +725,6 @@ class exports.SynchronizedDB extends EventEmitter
         delete @_data
 
     # set the data object to equal what is defined in the syncdoc
-    #
     _set_data_from_doc: () =>
         # change/add anything that has changed or been added
         i = 0
@@ -737,6 +736,7 @@ class exports.SynchronizedDB extends EventEmitter
                 h = hash_string(x)
                 hashes[h] = true
                 if not @_data[h]?
+                    # insert a new record
                     try
                         data = @from_json(x)
                     catch e
@@ -747,9 +747,9 @@ class exports.SynchronizedDB extends EventEmitter
                     @_data[h] = {data:data, line:i}
                     changes.push({insert:misc.deep_copy(data)})
             i += 1
-        # delete anything that was deleted
         for h,v of @_data
             if not hashes[h]?
+                # delete this record
                 changes.push({remove:v.data})
                 delete @_data[h]
         if changes.length > 0
@@ -757,13 +757,17 @@ class exports.SynchronizedDB extends EventEmitter
         return is_valid
 
     _set_doc_from_data: (hash) =>
-        if hash?
-            # only one line changed
+        if hash? and @_data[hash]?  # second condition due to potential of @_data changing before _set_doc_from_data called
+            # one line changed
             d = @_data[hash]
             v = @_doc.live().split('\n')
             v[d.line] = @to_json(d.data)
+            new_hash = hash_string(v[d.line])
+            if new_hash != hash
+                @_data[new_hash] = d
+                delete @_data[hash]
         else
-            # major change to doc (e.g., deleting or adding records)
+            # possible major change to doc (e.g., deleting or adding records)
             m = []
             for hash, x of @_data
                 m[x.line] = {hash:hash, x:x}
@@ -790,12 +794,13 @@ class exports.SynchronizedDB extends EventEmitter
     sync: (cb) =>
         @_doc.sync(cb)
 
-    # change (or create) exactly *one* database entry that matches the given where criterion.
+    # change (or create) exactly *one* database entry that matches
+    # the given where criterion.
     update: (opts) =>
         opts = defaults opts,
             set   : required
             where : required
-        set = opts.set
+        set   = opts.set
         where = opts.where
         i = 0
         for hash, val of @_data
@@ -806,19 +811,44 @@ class exports.SynchronizedDB extends EventEmitter
                     match = false
                     break
             if match
+                # modify exactly one existing database entry
+                changed = false
+                before = misc.deep_copy(x)
                 for k, v of set
+                    if not changed and misc.to_json(x[k]) != misc.to_json(v)
+                        changes = [{remove:before}]
+                        changed = true
                     x[k] = v
-                @_set_doc_from_data(hash)
+                if changed
+                    if @max_len?
+                        cur_len = @_doc.live().length
+                        new_len = misc.to_json(x).length - misc.to_json(before).length + cur_len
+                        if new_len > @max_len
+                            @_data[hash].data = before
+                            throw {error:"max_len", new_len:new_len, cur_len:cur_len, max_len:@max_len}
+                    # actually changed something
+                    changes.push({insert:misc.deep_copy(x)})
+                    @emit("change", changes)
+                    @_set_doc_from_data(hash)
                 return
             i += 1
+
+        # add a new entry
         new_obj = {}
         for k, v of set
             new_obj[k] = v
         for k, v of where
             new_obj[k] = v
-        hash = hash_string(@to_json(new_obj))
+        j = @to_json(new_obj)
+        if @max_len?
+            cur_len = @_doc.live().length
+            new_len = j.length + 1 + @_doc.live().length
+            if new_len > @max_len
+                throw {error:"max_len", new_len:new_len, cur_len:cur_len, max_len:@max_len}
+        hash = hash_string(j)
         @_data[hash] = {data:new_obj, line:len(@_data)}
         @_set_doc_from_data(hash)
+        @emit("change", [{insert:misc.deep_copy(new_obj)}])
 
     # return list of all database objects that match given condition.
     select: (opts={}) =>
@@ -857,6 +887,7 @@ class exports.SynchronizedDB extends EventEmitter
             one   : false
         result = []
         i = 0
+        changes = []
         for hash, val of @_data
             x = val.data
             match = true
@@ -866,10 +897,13 @@ class exports.SynchronizedDB extends EventEmitter
                     break
             if match
                 i += 1
+                changes.push({remove:x})
                 delete @_data[hash]
                 if one
                     break
-        @_set_doc_from_data()
+        if i > 0
+            @_set_doc_from_data()
+            @emit("change", changes)
         return i
 
     # delete first thing in db that matches the given criterion
@@ -905,6 +939,12 @@ class exports.SynchronizedDB extends EventEmitter
                 changes[h2] = v
             uuids[v.data[key]] = true
         if misc.len(changes) > 0
+            w = []
+            for h, v of changes
+                w.push({remove:@_data[h]})
+                w.push({insert:v})
+            @emit("change", w)
+
             for h, v of changes
                 @_data[h] = v
             @_set_doc_from_data()

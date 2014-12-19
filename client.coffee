@@ -270,6 +270,8 @@ class exports.Connection extends EventEmitter
         @_data_handlers    = {}
         @execute_callbacks = {}
         @call_callbacks    = {}
+        @_project_title_cache = {}
+        @_user_names_cache = {}
 
         @register_data_handler(JSON_CHANNEL, @handle_json_data)
 
@@ -427,10 +429,10 @@ class exports.Connection extends EventEmitter
                 @emit(mesg.event, mesg)
             when "codemirror_bcast"
                 @emit(mesg.event, mesg)
-            when "activity_notifications"
+            when "activity_notifications"  # deprecated
                 @emit(mesg.event, mesg)
-            when "syncstring_diffsync2"
-                @emit("syncstring_diffsync2-#{mesg.session_id}", mesg)
+            when "recent_activity"
+                @emit(mesg.event, mesg.updates)
             when "error"
                 # An error that isn't tagged with an id -- some sort of general problem.
                 if not mesg.id?
@@ -938,13 +940,22 @@ class exports.Connection extends EventEmitter
                 else
                     opts.cb?(undefined, resp.project_id)
 
-    get_projects: (opts) ->
+    get_projects: (opts) =>
         opts = defaults opts,
             hidden : false
             cb : required
         @call
             message : message.get_projects(hidden:opts.hidden)
-            cb      : opts.cb
+            cb      : (err, mesg) =>
+                if not err and mesg.event == 'all_projects'
+                    for project in mesg.projects
+                        @_project_title_cache[project.project_id] = project.title
+                        collabs = project.collaborator
+                        if collabs?
+                            for collab in collabs
+                                if not @_user_names_cache[collab.account_id]?
+                                    @_user_names_cache[collab.account_id] = collab
+                opts.cb(err, mesg)
 
     #################################################
     # Individual Projects
@@ -962,6 +973,7 @@ class exports.Connection extends EventEmitter
                 else if resp.event == 'error'
                     opts.cb(resp.error)
                 else
+                    @_project_title_cache[opts.project_id] = resp.info.title
                     opts.cb(undefined, resp.info)
 
     # Return info about all sessions that have been started in this
@@ -1549,15 +1561,26 @@ class exports.Connection extends EventEmitter
     #################################################
     # Activity
     #################################################
-    report_path_activity: (opts) =>
+    get_all_activity: (opts) =>
         opts = defaults opts,
-            project_id : required
-            path       : required
-            cb         : undefined   # cb(err)
+            cb : required
         @call
-            message : message.path_activity
-                project_id  : opts.project_id
-                path        : opts.path
+            message : message.get_all_activity()
+            cb      : (err, mesg) =>
+                if err
+                    opts.cb?(err)
+                else if mesg.event == 'error'
+                    opts.cb?(mesg.error)
+                else
+                    opts.cb?(undefined, misc.activity_log(mesg.activity_log))
+
+    mark_activity: (opts) =>
+        opts = defaults opts,
+            events  : required     # [{path:'project_id/filesystem_path', timestamp:number}, ...]
+            mark    : required     # 'read', 'seen'
+            cb      : undefined
+        @call
+            message : message.mark_activity(events:opts.events, mark:opts.mark)
             cb      : (err, mesg) =>
                 if err
                     opts.cb?(err)
@@ -1565,41 +1588,6 @@ class exports.Connection extends EventEmitter
                     opts.cb?(mesg.error)
                 else
                     opts.cb?()
-
-    get_notifications_syncdb: (opts) =>
-        opts = defaults opts,
-            cb : required
-        @call
-            message : message.get_notifications_syncdb()
-            cb      : (err, mesg) =>
-                if err
-                    opts.cb(err)
-                else if mesg.event == 'error'
-                    opts.cb(mesg.error)
-                else
-                    opts.cb(undefined, mesg.string_id)
-
-    #################################################
-    # Synchronized Strings (database backed)
-    # x={};require('syncstring').syncstring({string_id:'foo',cb:function(e,s){console.log(e,s);x.s=s}})
-    # x.s.live='hub'+x.s.live
-    # x.s.sync(function(e,f){console.log("done",e,f)})
-    ##################################################
-    syncstring_get_session: (opts) =>
-        opts = defaults opts,
-            string_id  : required
-            cb         : undefined   # cb(err, {session_id:?, string:?, readonly:?})
-        @call
-            message :
-                message.syncstring_get_session
-                    string_id : opts.string_id
-            cb      : (err, resp) =>
-                if err
-                    opts.cb?(err)
-                else if resp.event == 'error'
-                    opts.cb?(resp.error)
-                else
-                    opts.cb?(undefined, resp)
 
 
     #################################################
@@ -1717,7 +1705,7 @@ class exports.Connection extends EventEmitter
         )
 
     #################################################
-    # Search
+    # Search / user info
     #################################################
 
     user_search: (opts) =>
@@ -1781,6 +1769,79 @@ class exports.Connection extends EventEmitter
                     opts.cb(result.error)
                 else
                     opts.cb(undefined, result)
+
+    ############################################
+    # Bulk information about several projects or accounts
+    # (may be used by activity notifications, chat, etc.)
+    # NOTE:
+    #    When get_projects is called (which happens regularly), any info about
+    #    project titles or "account_id --> name" mappings gets updated. So
+    #    usually get_project_titles and get_user_names doesn't even have
+    #    to make a call to the server.   A case where it would is when rendering
+    #    the notifications and the project list hasn't been returned.  Also,
+    #    at some point, project list will probably just return the most recent
+    #    projects or partial info about them.
+    #############################################
+
+    get_project_titles: (opts) ->
+        opts = defaults opts,
+            project_ids : required
+            use_cache   : true
+            cb          : required     # cb(err, map from project_id to string (project title))
+        titles = {}
+        for project_id in opts.project_ids
+            titles[project_id] = false
+        if opts.use_cache
+            for project_id, done of titles
+                if not done and @_project_title_cache[project_id]?
+                    titles[project_id] = @_project_title_cache[project_id]
+        project_ids = (project_id for project_id,done of titles when not done)
+        if project_ids.length == 0
+            opts.cb(undefined, titles)
+        else
+            @call
+                message : message.get_project_titles(project_ids : project_ids)
+                cb      : (err, resp) =>
+                    if err
+                        opts.cb(err)
+                    else if resp.event == 'error'
+                        opts.cb(resp.error)
+                    else
+                        for project_id, title of resp.titles
+                            titles[project_id] = title
+                            @_project_title_cache[project_id] = title   # TODO: we could expire this cache...
+                        opts.cb(undefined, titles)
+
+
+    get_user_names: (opts) ->
+        opts = defaults opts,
+            account_ids : required
+            use_cache   : true
+            cb          : required     # cb(err, map from account_id to {first_name:?, last_name:?})
+        user_names = {}
+        for account_id in opts.account_ids
+            user_names[account_id] = false
+        if opts.use_cache
+            for account_id, done of user_names
+                if not done and @_user_names_cache[account_id]?
+                    user_names[account_id] = @_user_names_cache[account_id]
+        account_ids = (account_id for account_id,done of user_names when not done)
+        if account_ids.length == 0
+            opts.cb(undefined, user_names)
+        else
+            @call
+                message : message.get_user_names(account_ids : account_ids)
+                cb      : (err, resp) =>
+                    if err
+                        opts.cb(err)
+                    else if resp.event == 'error'
+                        opts.cb(resp.error)
+                    else
+                        for account_id, user_name of resp.user_names
+                            user_names[account_id] = user_name
+                            @_user_names_cache[account_id] = user_name   # TODO: we could expire this cache...
+                        opts.cb(undefined, user_names)
+
 
     #################################################
     # Linked projects
@@ -2073,9 +2134,10 @@ class exports.Connection extends EventEmitter
         opts = defaults opts,
             project_id  : required
             path        : required
-            timeout     : 90          # some things can take a long time to print!
+            timeout     : 90          # client timeout -- some things can take a long time to print!
             options     : undefined   # optional options that get passed to the specific backend for this file type
             cb          : undefined   # cp(err, relative path in project to printed file)
+        opts.options.timeout = opts.timeout  # timeout on backend
         @call_local_hub
             project_id : opts.project_id
             message    : message.print_to_pdf
@@ -2083,10 +2145,14 @@ class exports.Connection extends EventEmitter
                 options : opts.options
             timeout    : opts.timeout
             cb         : (err, resp) =>
+                console.log("print_to_pdf returned resp = ", resp)
                 if err
                     opts.cb?(err)
                 else if resp.event == 'error'
-                    opts.cb?(resp.error)
+                    if resp.error?
+                        opts.cb?(resp.error)
+                    else
+                        opts.cb?('error')
                 else
                     opts.cb?(undefined, resp.path)
 
