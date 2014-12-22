@@ -81,6 +81,11 @@ class Session extends EventEmitter
         @init_history = opts.init_history
         @emit("open")
 
+        ## This is no longer necessary; or rather, it's better to only
+        ## reset terminals, etc., when they are used, since it wastes
+        ## less resources.
+        # I'm going to leave this in for now -- it's only used for console sessions,
+        # and they aren't properly reconnecting in all cases.
         if @reconnect?
             @conn.on "connected", (() => setTimeout(@reconnect, 500))
 
@@ -97,7 +102,6 @@ class Session extends EventEmitter
         @emit "reconnecting"
         @_reconnect_lock = true
         #console.log("reconnect: #{@type()} session with id #{@session_uuid}...")
-
         f = (cb) =>
             @conn.call
                 message : message.connect_to_session
