@@ -706,9 +706,10 @@ class Client extends EventEmitter
         @compute_session_uuids = []
         c = clients[@conn.id]
         delete clients[@conn.id]
-        for id,f of c.call_callbacks
-            f("connection closed")
-        delete c.call_callbacks
+        if c? and c.call_callbacks?
+            for id,f of c.call_callbacks
+                f("connection closed")
+            delete c.call_callbacks
 
     remember_me_failed: (reason) =>
         @push_to_client(message.remember_me_failed(reason:reason))
@@ -2475,7 +2476,7 @@ class Client extends EventEmitter
                     return
                 project.read_file
                     path    : mesg.path
-                    maxsize : 1000000  # restrict to 1MB -- for now
+                    maxsize : 5000000  # restrict to 5MB -- for now
                     cb      : (err, data) =>
                         if err
                             @error_to_client(id:mesg.id, error:err)
