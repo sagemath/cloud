@@ -117,15 +117,22 @@ codemirror_associations =
 
 file_associations = exports.file_associations = {}
 for ext, mode of codemirror_associations
+    name = mode
+    i = name.indexOf('x-')
+    if i != -1
+        name = name.slice(i+2)
+    name = name.replace('src','')
     file_associations[ext] =
         editor : 'codemirror'
         icon   : 'fa-file-code-o'
         opts   : {mode:mode}
+        name   : name
 
 file_associations['tex'] =
     editor : 'latex'
     icon   : 'fa-file-excel-o'
     opts   : {mode:'stex2', indent_unit:4, tab_size:4}
+    name   : "latex"
 #file_associations['tex'] =  # TODO: only for TESTING!!!
 #    editor : 'html-md'
 #    icon   : 'fa-file-code-o'
@@ -136,74 +143,103 @@ file_associations['html'] =
     editor : 'html-md'
     icon   : 'fa-file-code-o'
     opts   : {indent_unit:4, tab_size:4, mode:'htmlmixed'}
+    name   : "html"
 
 file_associations['md'] =
     editor : 'html-md'
     icon   : 'fa-file-code-o'
     opts   : {indent_unit:4, tab_size:4, mode:'gfm2'}
+    name   : "markdown"
 
 file_associations['rst'] =
     editor : 'html-md'
     icon   : 'fa-file-code-o'
     opts   : {indent_unit:4, tab_size:4, mode:'rst'}
+    name   : "ReST"
 
 file_associations['mediawiki'] = file_associations['wiki'] =
     editor : 'html-md'
     icon   : 'fa-file-code-o'
     opts   : {indent_unit:4, tab_size:4, mode:'mediawiki'}
+    name   : "MediaWiki"
 
 file_associations['sass'] =
     editor : 'codemirror'
     icon   : 'fa-file-code-o'
     opts   : {mode:'text/x-sass', indent_unit:2, tab_size:2}
+    name   : "SASS"
 
 file_associations['css'] =
     editor : 'codemirror'
     icon   : 'fa-file-code-o'
     opts   : {mode:'css', indent_unit:4, tab_size:4}
-
-file_associations['sage-terminal'] =
-    editor : 'terminal'
-    icon   : 'fa-terminal'
-    opts   : {}
+    name   : "CSS"
 
 file_associations['term'] =
     editor : 'terminal'
     icon   : 'fa-terminal'
     opts   : {}
+    name   : "Terminal"
 
 file_associations['ipynb'] =
     editor : 'ipynb'
     icon   : 'fa-list-alt'
     opts   : {}
+    name   : "ipython notebook"
 
 for ext in ['png', 'jpg', 'gif', 'svg']
     file_associations[ext] =
         editor : 'image'
         icon   : 'fa-file-image-o'
         opts   : {}
+        name   : ext
+        exclude_from_menu : true
 
 file_associations['pdf'] =
     editor : 'pdf'
     icon   : 'fa-file-pdf-o'
     opts   : {}
+    name   : 'pdf'
+    exclude_from_menu : true
 
 file_associations['tasks'] =
     editor : 'tasks'
     icon   : 'fa-tasks'
     opts   : {}
+    name   : 'task list'
 
 file_associations['course'] =
     editor : 'course'
     icon   : 'fa-graduation-cap'
     opts   : {}
+    name   : 'course'
 
 
 file_associations['sage-history'] =
     editor : 'history'
     icon   : 'fa-history'
     opts   : {}
+    name   : 'sage history'
+    exclude_from_menu : true
 
+initialize_new_file_type_list = () ->
+    file_type_list = $(".smc-new-file-type-list")
+    file_types_so_far = {}
+    v = misc.keys(file_associations)
+    v.sort()
+
+    for ext in v
+        if not ext
+            continue
+        data = file_associations[ext]
+        if data.exclude_from_menu
+            continue
+        if data.name? and not file_types_so_far[data.name]
+            file_types_so_far[data.name] = true
+            e = $("<li><a href='#new-file' data-ext='#{ext}'><i class='fa #{data.icon}'></i> <span style='text-transform:capitalize'>#{data.name} </span> <span class='lighten'>(.#{ext})</span></a></li>")
+            file_type_list.append(e)
+
+initialize_new_file_type_list()
 
 exports.file_icon_class = file_icon_class = (ext) ->
     if (file_associations[ext]? and file_associations[ext].icon?) then file_associations[ext].icon else 'fa-file-o'
@@ -2062,10 +2098,10 @@ class CodeMirrorEditor extends FileEditor
 
             chat_output    = chat_elt.find(".salvus-editor-codemirror-chat-output")
             chat_input     = chat_elt.find(".salvus-editor-codemirror-chat-input")
-            chat_input_top = $(window).height()-chat_input.height() - 15
+            chat_input_top = $(window).height() - chat_input.height() - 15
 
             chat_input.offset({top:chat_input_top})
-            chat_output.height(chat_input_top - top - 60)
+            chat_output.height(chat_input_top - chat_output.offset().top - 30)
 
 
     focus: () =>
@@ -2078,20 +2114,24 @@ class CodeMirrorEditor extends FileEditor
     ############
     # Editor button bar support code
     ############
-
     textedit_command: (cm, cmd, args) =>
         switch cmd
             when "link"
-                cm.insert_link()
+                cm.insert_link(cb:() => @syncdoc?.sync())
+                return false  # don't return true or get an infinite recurse
             when "image"
-                cm.insert_image()
+                cm.insert_image(cb:() => @syncdoc?.sync())
+                return false  # don't return true or get an infinite recurse
             when "SpecialChar"
-                cm.insert_special_char()
+                cm.insert_special_char(cb:() => @syncdoc?.sync())
+                return false  # don't return true or get an infinite recurse
             else
                 cm.edit_selection
                     cmd  : cmd
                     args : args
-        @syncdoc?.sync()
+                @syncdoc?.sync()
+                # needed so that dropdown menu closes when clicked.
+                return true
 
     # add a textedit toolbar to the editor
     init_sagews_edit_buttons: () =>
@@ -2158,8 +2198,7 @@ class CodeMirrorEditor extends FileEditor
                 args = "#{args}"
                 if args.indexOf(',') != -1
                     args = args.split(',')
-            that.textedit_command(that.focused_codemirror(), cmd, args)
-            return true # <- this return true does the magic of closing the dropdown menu when a button is clicked
+            return that.textedit_command(that.focused_codemirror(), cmd, args)
 
         @fallback_buttons.find("a[href=#todo]").click () =>
             bootbox.alert("<i class='fa fa-wrench' style='font-size: 18pt;margin-right: 1em;'></i> Button bar not yet implemented in <code>#{mode_display.text()}</code> cells.")
@@ -5393,6 +5432,9 @@ class HTML_MD_Editor extends FileEditor
         button_bar = @edit_buttons
         init_color_control = () =>
             elt   = button_bar.find(".sagews-output-editor-foreground-color-selector")
+            if IS_MOBILE
+                elt.hide()
+                return
             button_bar_input = elt.find("input").colorpicker()
             sample = elt.find("i")
             set = (hex, init) =>
@@ -5418,6 +5460,9 @@ class HTML_MD_Editor extends FileEditor
         # initialize the color control
         init_background_color_control = () =>
             elt   = button_bar.find(".sagews-output-editor-background-color-selector")
+            if IS_MOBILE
+                elt.hide()
+                return
             button_bar_input = elt.find("input").colorpicker()
             sample = elt.find("i")
             set = (hex, init) =>
@@ -5756,8 +5801,6 @@ class HTML_MD_Editor extends FileEditor
     init_preview_select: () =>
         @preview_content.click (evt) =>
             sel = window.getSelection()
-            window.sel = sel
-            window.evt = evt
             if @ext=='html'
                 p = $(evt.target).prevAll(".smc-pos:first")
             else

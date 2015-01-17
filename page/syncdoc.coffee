@@ -1280,6 +1280,9 @@ class SynchronizedWorksheet extends SynchronizedDocument
         # initialize the color control
         init_color_control = () =>
             elt   = button_bar.find(".sagews-output-editor-foreground-color-selector")
+            if IS_MOBILE
+                elt.hide()
+                return
             button_bar_input = elt.find("input").colorpicker()
             sample = elt.find("i")
             set = (hex) ->
@@ -1309,6 +1312,9 @@ class SynchronizedWorksheet extends SynchronizedDocument
         # initialize the color control
         init_background_color_control = () =>
             elt   = button_bar.find(".sagews-output-editor-background-color-selector")
+            if IS_MOBILE
+                elt.hide()
+                return
             button_bar_input = elt.find("input").colorpicker()
             sample = elt.find("i")
             set = (hex) ->
@@ -1939,6 +1945,13 @@ class SynchronizedWorksheet extends SynchronizedDocument
         if mesg.interact?
             @interact(output, mesg.interact)
 
+        if mesg.d3?
+            e = $("<span>")
+            output.append(e)
+            e.d3
+                viewer : mesg.d3.viewer
+                data   : mesg.d3.data
+
         if mesg.md?
             # markdown
             x = misc_page.markdown_to_html(mesg.md)
@@ -1978,7 +1991,11 @@ class SynchronizedWorksheet extends SynchronizedDocument
                     # TODO: harden DOM creation below?
 
                     when 'webm'
-                        video = $("<video src='#{target}' class='sagews-output-video' preload controls loop>")
+                        if $.browser.safari or $.browser.ie
+                            output.append($("<br><strong>WARNING:</strong> webm animations not supported on Safari or IE; use an animated gif instead, e.g., the gif=True option to show.<br>"))
+                        if $.browser.firefox
+                            output.append($("<br><strong>WARNING:</strong> Right click and select play.<br>"))
+                        video = $("<video src='#{target}' class='sagews-output-video' controls></video>")
                         output.append(video)
 
                     when 'sage3d'
