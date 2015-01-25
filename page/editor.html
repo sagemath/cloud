@@ -194,8 +194,8 @@ Editor for files in a project
                     <a href="#superscript" class="btn btn-default" data-toggle="tooltip" data-placement="top" title="Superscript"><i class="fa fa-superscript"></i></a>
                 </span>
                 <span class="btn-group">
-                    <a href="#equation" data-args="special" class="btn btn-default"  data-toggle="tooltip" data-placement="top" title="Inline equation..."> \$  </a>
-                    <a href="#display_equation" data-args="special" class="btn btn-default"  data-toggle="tooltip" data-placement="top" title="Displayed equation..."> \$\$  </a>
+                    <a href="#equation" data-args="special" class="btn btn-default"  data-toggle="tooltip" data-placement="top" title="Inline equation..."> $  </a>
+                    <a href="#display_equation" data-args="special" class="btn btn-default"  data-toggle="tooltip" data-placement="top" title="Displayed equation..."> $$  </a>
                     <a href="#insertunorderedlist" class="btn btn-default"  data-toggle="tooltip" data-placement="top" title="Insert unordered list"><i class="fa fa-list"></i></a>
                     <a href="#insertorderedlist" class="btn btn-default"  data-toggle="tooltip" data-placement="top" title="Insert ordered list"><i class="fa fa-list-ol"></i></a>
                     <a href="#link" data-args="special" class="btn btn-default"  data-toggle="tooltip" data-placement="top" title="Insert link..."><i class="fa fa-link"></i></a>
@@ -1009,8 +1009,8 @@ Editor for files in a project
             <a href="#comment" class="btn btn-default" data-toggle="tooltip" data-placement="bottom" title="Comment out selection"><i class="fa fa-comment-o"></i></a>
         </span>
         <span class="btn-group">
-            <a href="#equation" class="btn btn-default"  data-toggle="tooltip" data-placement="bottom" title="Inline equation..."> \$  </a>
-            <a href="#display_equation" class="btn btn-default"  data-toggle="tooltip" data-placement="bottom" title="Displayed equation..."> \$\$  </a>
+            <a href="#equation" class="btn btn-default"  data-toggle="tooltip" data-placement="bottom" title="Inline equation..."> $  </a>
+            <a href="#display_equation" class="btn btn-default"  data-toggle="tooltip" data-placement="bottom" title="Displayed equation..."> $$  </a>
             <a href="#insertunorderedlist" class="btn btn-default"  data-toggle="tooltip" data-placement="bottom" title="Insert unordered list"><i class="fa fa-list"></i></a>
             <a href="#insertorderedlist" class="btn btn-default"  data-toggle="tooltip" data-placement="bottom" title="Insert ordered list"><i class="fa fa-list-ol"></i></a>
             <a href="#link" data-args="special" class="btn btn-default"  data-toggle="tooltip" data-placement="bottom" title="Insert link..."><i class="fa fa-link"></i></a>
@@ -1051,13 +1051,13 @@ Editor for files in a project
                 </ul>
             </span>
         </span>
-        <span class="btn-group hide">  <!-- todo -->
+        <span class="btn-group">
             <span class="sagews-output-editor-foreground-color-selector input-group color smc-tooltip" data-color-format="rgb" data-toggle="tooltip" data-placement="bottom" title="Text color">
                 <input type="text" style="cursor:pointer" class="form-control">
                 <span class="input-group-addon" style="padding: 3px;"><i class="fa fa-font" style="height: 16px; width: 16px"></i><b class="caret"></b></span>
             </span>
         </span>
-        <span class="btn-group hide">  <!-- todo -->
+        <span class="btn-group">
             <span class="sagews-output-editor-background-color-selector input-group color smc-tooltip" data-color-format="rgb" data-toggle="tooltip" data-placement="bottom" title="Text background highlight color">
                 <input type="text" style="cursor:pointer" class="form-control">
                 <span class="input-group-addon"  style="padding: 3px;"><i class="fa fa-font" style="height: 16px; width: 16px"></i><b class="caret"></b></span>
@@ -1079,6 +1079,69 @@ Editor for files in a project
         <a class="btn btn-default" href="#todo">&hellip;</a>
     </div>
 
-</div>
+    <!-- smc wizard, see wizard.coffee -->
+    <div class="modal smc-wizard" data-backdrop="static" tabindex="-1" role="dialog" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div class="row">
+                        <div class="col-sm-3"><h2><i class="fa fa-magic"></i> Wizard</h2>
+                        </div>
+                        <div class="col-sm-8">
+                            <div>
+                                <ul class="nav nav-pills smc-wizard-nav">
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="col-sm-1">
+                            <button type="button" class="close btn-close" aria-hidden="true" data-dismiss="modal">
+                                <span>×</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-sm-3">
+                            <div>
+                                <ul class="list-group smc-wizard-lvl1">
+                                    <!-- <li class="list-group-item active"><span class="badge">3</span>Porta ac consectetur ac</li> -->
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="col-sm-3">
+                            <div>
+                                <ul class="list-group smc-wizard-lvl2">
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <div>
+                                <ul class="list-group smc-wizard-doc">
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-sm-6">
+                            <pre class="code smc-wizard-code"></pre>
+                        </div>
+                        <div class="col-sm-6">
+                            <div class="panel panel-default smc-wizard-descr">
+                                <!--<div class="panel-heading">Title 123</div>-->
+                                <div class="panel-body">
+                                </div>
+                            </div>
 
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-close btn-default">Cancel</button>
+                    <button class="btn btn-primary btn-submit">Insert Code</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 
