@@ -225,22 +225,35 @@ file_associations['sage-history'] =
     name   : 'sage history'
     exclude_from_menu : true
 
+file_associations['sage'].name = "sage code"
+
+file_associations['sagews'].name = "sage worksheet"
+file_associations['sagews'].exclude_from_menu = true
+
 initialize_new_file_type_list = () ->
-    file_type_list = $(".smc-new-file-type-list")
     file_types_so_far = {}
     v = misc.keys(file_associations)
     v.sort()
-
-    for ext in v
+    f = (elt, ext, exclude) ->
         if not ext
-            continue
+            return
         data = file_associations[ext]
-        if data.exclude_from_menu
-            continue
+        if exclude and data.exclude_from_menu
+            return
         if data.name? and not file_types_so_far[data.name]
             file_types_so_far[data.name] = true
-            e = $("<li><a href='#new-file' data-ext='#{ext}'><i class='fa #{data.icon}'></i> <span style='text-transform:capitalize'>#{data.name} </span> <span class='lighten'>(.#{ext})</span></a></li>")
-            file_type_list.append(e)
+            e = $("<li><a href='#new-file' data-ext='#{ext}'><i style='width: 18px;' class='fa #{data.icon}'></i> <span style='text-transform:capitalize'>#{data.name} </span> <span class='lighten'>(.#{ext})</span></a></li>")
+            elt.append(e)
+
+    elt = $(".smc-new-file-type-list")
+    for ext in v
+        f(elt, ext, true)
+
+    elt = $(".smc-mini-new-file-type-list")
+    file_types_so_far = {}
+    for ext in ['sagews', 'term', 'ipynb', 'tex', 'md', 'tasks', 'course', 'sage', 'py']
+        f(elt, ext)
+    elt.append($("<li class='divider'></li><li><a href='#new-folder'><i style='width: 18px;' class='fa fa-folder'></i> <span>Folder </span></a></li>"))
 
 initialize_new_file_type_list()
 
@@ -3189,7 +3202,9 @@ class PDF_PreviewEmbed extends FileEditor
                 if err or not result.url?
                     alert_message(type:"error", message:"unable to get pdf -- #{err}")
                 else
-                    @output.html("<object data=\"#{result.url}\" type='application/pdf' width='#{width}' height='#{output_height-10}'><br><br>Your browser doesn't support embedded PDF's, but you can <a href='#{result.url}&random=#{Math.random()}'>download #{@filename}</a></p></object>")
+                    @output.find("object").attr('data', result.url).width(width).height(output_height-10)
+                    @output.find("a").attr('href',"#{result.url}?random=#{Math.random()}")
+                    @output.find("span").text(@filename)
 
     show: (geometry={}) =>
         geometry = defaults geometry,
