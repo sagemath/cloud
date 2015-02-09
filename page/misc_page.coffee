@@ -447,7 +447,7 @@ exports.define_codemirror_extensions = () ->
                 # find environment close
                 environ = get_latex_environ(line.slice(BEGIN.length))
                 if not environ?
-                    return
+                    return [undefined, undefined]
                 # find environment close
                 END   = "\\end"
                 level = 0
@@ -1316,6 +1316,9 @@ codemirror_introspect_modal.on 'hidden.bs.modal', () ->
     codemirror_introspect_modal.data('editor',0)
 
 exports.download_file = (url) ->
+    #console.log("download_file(#{url})")
+    ## NOTE: the file has to be served with
+    ##    res.setHeader('Content-disposition', 'attachment')
     iframe = $("<iframe>").addClass('hide').attr('src', url).appendTo($("body"))
     setTimeout((() -> iframe.remove()), 60000)
 

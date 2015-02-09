@@ -97,7 +97,7 @@ CASSANDRA_PORTS = CASSANDRA_INTERNODE_PORTS + [CASSANDRA_CLIENT_PORT, CASSANDRA_
 # See http://www.nixtutor.com/linux/send-mail-through-gmail-with-python/
 ####################
 
-def email(msg= '', subject='ADMIN -- cloud.sagemath.com', toaddrs='wstein@uw.edu', fromaddr='salvusmath@gmail.com'):
+def email(msg= '', subject='ADMIN -- cloud.sagemath.com', toaddrs='wstein@sagemath.com', fromaddr='salvusmath@gmail.com'):
     log.info("sending email to %s", toaddrs)
     username = 'salvusmath'
     password = open(os.path.join(os.environ['HOME'],'salvus/salvus/data/secrets/salvusmath_email_password')
@@ -134,14 +134,18 @@ def zfs_size(s):
 ####################
 MAXTIME_S=300
 
-def run(args, maxtime=MAXTIME_S, verbose=True):
+def run(args, maxtime=MAXTIME_S, verbose=True, stderr=True):
     """
     Run the command line specified by args (using subprocess.Popen)
     and return the stdout and stderr, killing the subprocess if it
     takes more than maxtime seconds to run.
 
+    If stderr is false, don't include in the returned output.
+
     If args is a list of lists, run all the commands separately in the
     list.
+
+    if ignore_errors is true, completely ignores any error codes!
     """
     if args and isinstance(args[0], list):
         return '\n'.join([str(run(a, maxtime=maxtime,verbose=verbose)) for a in args])
@@ -156,8 +160,13 @@ def run(args, maxtime=MAXTIME_S, verbose=True):
     if verbose:
         log.info("running '%s'", ' '.join(args))
     try:
-        out = subprocess.Popen(args, stdin=subprocess.PIPE, stdout = subprocess.PIPE,
-                                stderr=subprocess.PIPE).stdout.read()
+        a = subprocess.Popen(args, stdin=subprocess.PIPE, stdout = subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        if stderr:
+            out = a.stderr.read()
+        else:
+            out = ''
+        out += a.stdout.read()
         if verbose:
             log.info("output '%s'", out[:256])
         return out
@@ -1511,7 +1520,7 @@ class Monitor(object):
         h = ' '.join([host for host in self._hosts[hosts] if host not in exclude])
         if not h:
             return []
-        for k, v in self._hosts(h, cmd, parallel=True, wait=True, timeout=80).iteritems():
+        for k, v in self._hosts(h, cmd, parallel=True, wait=True, timeout=30).iteritems():
             d = {'host':k[0], 'service':'dns'}
             exit_code = v.get('stdout','').strip()
             if exit_code == '':
@@ -1740,7 +1749,7 @@ class Monitor(object):
                 #print "%s minutes since epoch"%now
                 if now % interval == residue:
                     i += 1
-                    if i % 3 == 0:
+                    if i % 10 == 0:
                         # update the external static ip address in the database every so often.
                         try:
                             self._services.update_ssh_storage_server_access()
@@ -2274,6 +2283,7 @@ class Services(object):
           - for uw machines: get the address from our conf script showing who hosts each vm
           - for the google machines: get both addresses by querying gcutil
         """
+        # TODO: temporarily disabled due to problem with google firewall -- will fix.
         import cassandra
         password = open(os.path.join(SECRETS, 'cassandra/monitor')).read().strip()
         print cassandra.KEYSPACE
@@ -2296,7 +2306,9 @@ class Services(object):
                 if v:
                     # Yep, it's a GCE machine: get the network info
                     cmd = ['gcutil', '--project', 'sagemathcloud', 'getinstance', '--format','json', 'smc-%s'%hostname]
-                    z = json.loads(run(cmd, verbose=False, maxtime=60))
+                    out = run(cmd, verbose=True, maxtime=60, stderr=False)
+                    self.out =out
+                    z = json.loads(out)
                     google_ip   = z["networkInterfaces"][0]["networkIP"]
                     external_ip = z["networkInterfaces"][0]["accessConfigs"][0]["natIP"]
                     value[-1] = external_ip
