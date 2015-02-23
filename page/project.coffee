@@ -156,6 +156,8 @@ class ProjectPage
             @init_ssh_url_click()
             @init_billing()
 
+            @init_add_collaborators_button()
+
         # Show a warning if using SMC in devel mode. (no longer supported)
         if window.salvus_base_url != ""
             # TODO -- should use a better way to decide dev mode.
@@ -1258,18 +1260,27 @@ class ProjectPage
 
 
         # the search/mini file creation box
-        mini_set_input = () =>
-            search_box = @container.find(".salvus-project-search-for-file-input")
-            name = search_box.val().trim()
+        mini_search_box = @container.find(".salvus-project-search-for-file-input")
+        mini_set_input = (name) =>
+            if not name?
+                name = mini_search_box.val().trim()
             if name == ""
                 name = @default_filename()
             @update_new_file_tab_path()
             @new_file_tab_input.val(name)
-            search_box.val('')
+            mini_search_box.val('')
 
         @container.find("a[href=#smc-mini-new]").click () =>
-            mini_set_input()
-            create_file('sagews')
+            name = mini_search_box.val().trim()
+            if name
+                mini_set_input()
+                ext = misc.filename_extension(name)
+                if ext
+                    create_file(ext)
+                else
+                    create_file('sagews')
+            else
+                @load_target('new')
 
         @container.find(".smc-mini-new-file-type-list").find("a[href=#new-file]").click (evt) ->
             mini_set_input()
@@ -3669,6 +3680,21 @@ class ProjectPage
                 @editor.display_tab
                     path       : opened_path
                     foreground : opts.foreground
+
+
+    init_add_collaborators_button: () =>
+        @container.find("a[href=#projects-add-collaborators]").click () =>
+            @show_add_collaborators_box()
+            return false
+
+    show_add_collaborators_box: () =>
+        @display_tab('project-settings')
+        @container.find(".project-add-collaborator-input").focus()
+        collab = @container.find(".project-collaborators-box")
+        collab.css(border:'2px solid red')
+        setTimeout((()->collab.css(border:'')), 5000)
+        collab.css('box-shadow':'8px 8px 4px #888')
+        setTimeout((()->collab.css('box-shadow':'')), 5000)
 
 
 project_pages = {}

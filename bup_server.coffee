@@ -46,7 +46,7 @@ misc      = require('misc')
 misc_node = require('misc_node')
 uuid      = require('node-uuid')
 cassandra = require('cassandra')
-cql       = require("node-cassandra-cql")
+cql       = require("cassandra-driver")
 
 # Set the log level
 winston.remove(winston.transports.Console)
@@ -2030,12 +2030,10 @@ class GlobalClient
                             else
                                 v = program.address.split('.')
                                 a = parseInt(v[1]); b = parseInt(v[3])
-                                if a == 1 and b>=1 and b<=7
-                                    hosts = ("10.1.#{i}.2" for i in [1..7])
-                                else if a == 1 and b>=10 and b<=21
-                                    hosts = ("10.1.#{i}.2" for i in [10..21])
-                                else if a == 3 or a == 4
-                                    hosts = ("10.#{a}.#{i}.2" for i in [1..4])
+                                if program.address == '10.1.1.10'  or a == 1 or a == 3 or a == 4
+                                    hosts = ("smc#{i}dc5" for i in [1..8])
+                                else if a == 5 or a == 6 or a == 7
+                                    hosts = ("smc#{i}dc#{a}" for i in [1..8])
                             winston.debug("database hosts=#{misc.to_json(hosts)}")
                             @database = new cassandra.Salvus
                                 hosts       : hosts
@@ -2650,6 +2648,7 @@ class GlobalClient
                     columns   : ['project_id', 'bup_location', 'bup_last_save']
                     objectify : true
                     limit     : opts.qlimit # TODO: change to use paging...
+                    consistency : 1
                     cb        : (err, r) =>
                         if err
                             cb(err)

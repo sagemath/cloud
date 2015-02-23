@@ -87,7 +87,7 @@ misc    = require("misc")
 {defaults, required} = require('misc')
 message = require("message")     # salvus message protocol
 cass    = require("cassandra")
-cql     = require("node-cassandra-cql")
+cql     = require("cassandra-driver")
 client_lib = require("client")
 JSON_CHANNEL = client_lib.JSON_CHANNEL
 
@@ -764,12 +764,12 @@ class Client extends EventEmitter
             @handle_data_from_client(data)
 
         @conn.on "end", () =>
-            # Actually destroy Client in 10 minutes, unless user reconnects
+            # Actually destroy Client in a few minutes, unless user reconnects
             # to this session.  Often the user may have a temporary network drop,
-            # and we keep everything waiting for them for up to 10 minutes,
+            # and we keep everything waiting for them for short time
             # in case this happens.
             winston.debug("connection: hub <--> client(id=#{@id}, address=#{@ip_address})  -- CLOSED; starting destroy timer")
-            @_destroy_timer = setTimeout(@destroy, 1000*10*60)
+            @_destroy_timer = setTimeout(@destroy, 1000*60*10)
 
         winston.debug("connection: hub <--> client(id=#{@id}, address=#{@ip_address})  ESTABLISHED")
 
@@ -2566,7 +2566,7 @@ class Client extends EventEmitter
                     return
                 project.read_file
                     path    : mesg.path
-                    maxsize : 10000000  # restrict to 10MB -- for now
+                    maxsize : 20000000  # restrict to 20MB limit
                     cb      : (err, data) =>
                         if err
                             @error_to_client(id:mesg.id, error:err)
@@ -5000,15 +5000,16 @@ forgot_password = (mesg, client_ip_address, push_to_client) ->
                         cb()
 
         # We now know that there is an account with this email address.
-        # put entry in the password_reset uuid:value table with ttl of 1 hour, and send an email
+        # put entry in the password_reset uuid:value table with ttl of
+        # 1 hour, and send an email
         (cb) ->
             id = database.uuid_value_store(name:"password_reset").set(
                 value : mesg.email_address
                 ttl   : 60*60,
-                cb    : (error, results) ->
-                    if error
-                        push_to_client(message.forgot_password_response(id:mesg.id, error:"Internal error generating password reset for #{mesg.email_address}."))
-                        cb(true); return
+                cb    : (err, results) ->
+                    if err
+                        push_to_client(message.forgot_password_response(id:mesg.id, error:"Internal error generating password reset for #{mesg.email_address} -- #{err}"))
+                        cb(err); return
                     else
                         cb()
             )
@@ -5018,22 +5019,22 @@ forgot_password = (mesg, client_ip_address, push_to_client) ->
             body = """
                 Somebody just requested to change the password on your SageMathCloud account.
                 If you requested this password change, please change your password by
-                following the link below within 15 minutes:
+                following the link below within an hour:
 
                      https://cloud.sagemath.com#forgot-#{id}
 
                 If you don't want to change your password, ignore this message.
 
-                In case of problems, email wstein@uw.edu.
+                In case of problems, email help@sagemath.com immediately.
                 """
 
             send_email
                 subject : 'SageMathCloud password reset confirmation'
                 body    : body
                 to      : mesg.email_address
-                cb      : (error) ->
-                    if error
-                        push_to_client(message.forgot_password_response(id:mesg.id, error:"Internal error sending password reset email to #{mesg.email_address} -- #{error}."))
+                cb      : (err) ->
+                    if err
+                        push_to_client(message.forgot_password_response(id:mesg.id, error:"Internal error sending password reset email to #{mesg.email_address} -- #{err}."))
                         cb(true)
                     else
                         push_to_client(message.forgot_password_response(id:mesg.id))
@@ -5149,6 +5150,7 @@ get_all_feedback_from_user = (mesg, push_to_client, account_id) ->
 #########################################
 
 nodemailer   = require("nodemailer")
+sgTransport  = require('nodemailer-sendgrid-transport')
 email_server = undefined
 
 # here's how I test this function:
@@ -5157,7 +5159,7 @@ exports.send_email = send_email = (opts={}) ->
     opts = defaults opts,
         subject : required
         body    : required
-        from    : 'SageMathCloud <wstein@uw.edu>'  # obviously change this at some point.  But it is the best "reply to right now"
+        from    : 'SageMath Help <help@sagemath.com>'
         to      : required
         cc      : ''
         cb      : undefined
@@ -5185,12 +5187,8 @@ exports.send_email = send_email = (opts={}) ->
                         email_server = {disabled:true}
                         cb()
                         return
-                    email_server = nodemailer.createTransport "SMTP",
-                        service : "SendGrid"
-                        port    : 2525
-                        auth    :
-                            user: "wstein",
-                            pass: pass
+
+                    email_server = nodemailer.createTransport(sgTransport(auth:{api_user:'wstein', api_key:pass}))
                     dbg("started email server")
                     cb()
         (cb) ->
@@ -5198,17 +5196,19 @@ exports.send_email = send_email = (opts={}) ->
                 cb(undefined, 'email disabled -- no actual message sent')
                 return
             winston.debug("sendMail to #{opts.to} starting...")
-            email_server.sendMail
+            email =
                 from    : opts.from
                 to      : opts.to
                 text    : opts.body
                 subject : opts.subject
-                cc      : opts.cc,
-                cb      : (err) =>
-                    winston.debug("sendMail to #{opts.to} done... (err=#{misc.to_json(err)})")
-                    if err
-                        dbg("sendMail -- error = #{misc.to_json(err)}")
-                    cb(err)
+                cc      : opts.cc
+            email_server.sendMail email, (err, res) =>
+                winston.debug("sendMail to #{opts.to} done...; got err=#{misc.to_json(err)} and res=#{misc.to_json(res)}")
+                if err
+                    dbg("sendMail -- error = #{misc.to_json(err)}")
+                else
+                    dbg("sendMail -- success = #{misc.to_json(res)}")
+                cb(err)
 
     ], (err, message) ->
         if err

@@ -259,6 +259,8 @@ initialize_new_file_type_list = () ->
         f(elt, ext)
     elt.append($("<li class='divider'></li><li><a href='#new-folder'><i style='width: 18px;' class='fa fa-folder'></i> <span>Folder </span></a></li>"))
 
+    elt.append($("<li class='divider'></li><li><a href='#projects-add-collaborators'><i style='width: 18px;' class='fa fa-user'></i> <span>Collaborators... </span></a></li>"))
+
 initialize_new_file_type_list()
 
 exports.file_icon_class = file_icon_class = (ext) ->
@@ -3280,7 +3282,7 @@ class LatexEditor extends FileEditor
         @_pages = {}
 
         # initialize the latex_editor
-        @latex_editor = codemirror_session_editor(@editor, filename, opts)
+        @latex_editor = codemirror_session_editor(@editor, @filename, opts)
         @_pages['latex_editor'] = @latex_editor
         @element.find(".salvus-editor-latex-latex_editor").append(@latex_editor.element)
         @latex_editor.action_key = @action_key
@@ -4157,7 +4159,7 @@ class Terminal extends FileEditor
         @element = $("<div>").hide()
         elt = @element.salvus_console
             title     : "Terminal"
-            filename  : filename
+            filename  : @filename
             resizable : false
             close     : () => @editor.project_page.display_tab("project-file-listing")
             editor    : @
@@ -4376,7 +4378,7 @@ class IPythonNotebookServer  # call ipython_notebook_server above
             command    : "ipython-notebook"
             args       : ['start']
             bash       : false
-            timeout    : 30
+            timeout    : 40
             err_on_exit: false
             cb         : (err, output) =>
                 if err
@@ -4388,12 +4390,16 @@ class IPythonNotebookServer  # call ipython_notebook_server above
                             cb?(info.error)
                         else
                             @url = info.base; @pid = info.pid; @port = info.port
+                            if not @url? or not @pid? or not @port?
+                                # probably starting up -- try again in 3 seconds
+                                setTimeout((()=>@start_server(cb)), 3000)
+                                return
                             get_with_retry
                                 url : @url
                                 cb  : (err, data) =>
                                     cb?(err)
                     catch e
-                        cb?(true)
+                        cb?("error parsing ipython server output -- #{output.stdout}, #{e}")
 
     stop_server: (cb) =>
         if not @pid?
