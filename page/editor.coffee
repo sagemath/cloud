@@ -2355,25 +2355,25 @@ tmp_dir = (opts) ->
         path       : required
         ttl        : 120            # self destruct in this many seconds
         cb         : required       # cb(err, directory_name)
-    name = "." + uuid()   # hidden
+    path_name = "." + uuid()   # hidden
     if "'" in opts.path
         opts.cb("there is a disturbing ' in the path: '#{opts.path}'")
         return
     remove_tmp_dir
         project_id : opts.project_id
         path       : opts.path
-        tmp_dir    : name
+        tmp_dir    : path_name
         ttl        : opts.ttl
     salvus_client.exec
         project_id : opts.project_id
         path       : opts.path
         command    : "mkdir"
-        args       : [name]
+        args       : [path_name]
         cb         : (err, output) =>
             if err
                 opts.cb("Problem creating temporary directory in '#{opts.path}'")
             else
-                opts.cb(false, name)
+                opts.cb(false, path_name)
 
 remove_tmp_dir = (opts) ->
     opts = defaults opts,
@@ -2412,6 +2412,9 @@ class PDFLatexDocument
         @filename_tex  = s.tail
         @base_filename = @filename_tex.slice(0, @filename_tex.length-4)
         @filename_pdf  =  @base_filename + '.pdf'
+
+    dbg: (mesg) =>
+        #console.log("PDFLatexDocument: #{mesg}")
 
     page: (n) =>
         if not @_pages[n]?
@@ -2722,7 +2725,7 @@ class PDFLatexDocument
     # This computes images on backend, and fills in the sha1 hashes of @pages.
     # If any sha1 hash changes from what was already there, it gets temporary
     # url for that file.
-    # It assumes the pdf files is there already, and doesn't run pdflatex.
+    # It assumes the pdf files are there already, and doesn't run pdflatex.
     update_images: (opts={}) =>
         opts = defaults opts,
             first_page : 1
@@ -2732,6 +2735,7 @@ class PDFLatexDocument
             device     : '16m'      # one of '16', '16m', '256', '48', 'alpha', 'gray', 'mono'  (ignored if image_type='jpg')
             png_downscale : 2       # ignored if image type is jpg
             jpeg_quality  : 75      # jpg only -- scale of 1 to 100
+
 
         res = opts.resolution
         if @image_type == 'png'
@@ -2746,11 +2750,15 @@ class PDFLatexDocument
 
         if opts.first_page <= 0
             opts.first_page = 1
+        if opts.last_page > @num_pages
+            opts.last_page = @num_pages
 
         if opts.last_page < opts.first_page
-            # easy peasy
+            # easy special case
             opts.cb?(false,[])
             return
+
+        @dbg("update_images: #{opts.first_page} to #{opts.last_page} with res=#{opts.resolution}")
 
         tmp = undefined
         sha1_changed = []
@@ -2835,7 +2843,7 @@ class PDFLatexDocument
                     salvus_client.read_file_from_project
                         project_id : @project_id
                         path       : "#{tmp}/#{obj.filename}"
-                        timeout    : 5  # a single page shouldn't take long
+                        timeout    : 10  # a single page shouldn't take long
                         cb         : (err, result) =>
                             if err
                                 cb(err)
@@ -2876,6 +2884,8 @@ class PDF_Preview extends FileEditor
         @_first_output = true
         @_needs_update = true
 
+    dbg: (mesg) =>
+        #console.log("PDF_Preview: #{mesg}")
 
     zoom: (opts) =>
         opts = defaults opts,
@@ -2981,6 +2991,7 @@ class PDF_Preview extends FileEditor
             opts.cb?("already updating")  # don't change string
             return
 
+        @dbg("update")
         #@spinner.show().spin(true)
         @_updating = true
 
@@ -2988,15 +2999,18 @@ class PDF_Preview extends FileEditor
         if @element.width()
             @output.width(@element.width())
 
-        # Remove trailing pages from DOM.
+        # Hide trailing pages.
         if @pdflatex.num_pages?
+            @dbg("update: num_pages = #{@pdflatex.num_pages}")
             # This is O(N), but behaves better given the async nature...
             for p in @output.children()
                 page = $(p)
                 if page.data('number') > @pdflatex.num_pages
+                    @dbg("update: removing page number #{page.data('number')}")
                     page.remove()
 
         n = @current_page().number
+        @dbg("update: current_page=#{n}")
 
         f = (opts, cb) =>
             opts.cb = (err, changed_pages) =>
@@ -3005,8 +3019,8 @@ class PDF_Preview extends FileEditor
                 else if changed_pages.length == 0
                     cb()
                 else
-                    g = (n, cb) =>
-                        @_update_page(n, cb)
+                    g = (m, cb) =>
+                        @_update_page(m, cb)
                     async.map(changed_pages, g, cb)
             @pdflatex.update_images(opts)
 
@@ -3014,7 +3028,7 @@ class PDF_Preview extends FileEditor
         if n == 1
             hq_window *= 2
 
-        f {first_page : n, last_page  : n+1, resolution:@opts.resolution*3, device:'16m', png_downscale:3}, (err) =>
+        f {first_page: n, last_page: n+1, resolution:@opts.resolution*3, device:'16m', png_downscale:3}, (err) =>
             if err
                 #@spinner.spin(false).hide()
                 @_updating = false
@@ -3064,6 +3078,7 @@ class PDF_Preview extends FileEditor
             if @last_page >= n
                 @last_page = n-1
         else
+            @dbg("_update_page(#{n}) using #{url}")
             # update page
             recenter = (@last_page == 0)
             that = @
@@ -3071,7 +3086,7 @@ class PDF_Preview extends FileEditor
             if page.length == 0
                 # create
                 for m in [@last_page+1 .. n]
-                    page = $("<div style='text-align:center;' class='salvus-editor-pdf-preview-page-#{m}'><img alt='Page #{m}' class='salvus-editor-pdf-preview-image'><br></div>")
+                    page = $("<div style='text-align:center;min-height:3em;border:1px solid grey;' class='salvus-editor-pdf-preview-page-#{m}'><span class='lighten'>Page #{m}</span><br><img alt='Page #{m}' class='salvus-editor-pdf-preview-image'><br></div>")
                     page.data("number", m)
 
                     f = (e) ->
@@ -4451,6 +4466,13 @@ get_with_retry = (opts) ->
 
 # Embedded editor for editing IPython notebooks.  Enhanced with sync and integrated into the
 # overall cloud look.
+
+# Extension for the file used for synchronization of IPython
+# notebooks between users.
+# In the rare case that we change the format, must increase this and
+# also increase the version number forcing users to refresh their browser.
+IPYTHON_SYNCFILE_EXTENSION = ".syncdoc3"
+
 class IPythonNotebook extends FileEditor
     constructor: (@editor, @filename, url, opts) ->
         opts = @opts = defaults opts,
@@ -4473,9 +4495,9 @@ class IPythonNotebook extends FileEditor
         @file = s.tail
 
         if @path
-            @syncdoc_filename = @path + '/.' + @file + ".syncdoc"
+            @syncdoc_filename = @path + '/.' + @file + IPYTHON_SYNCFILE_EXTENSION
         else
-            @syncdoc_filename = '.' + @file + ".syncdoc"
+            @syncdoc_filename = '.' + @file + IPYTHON_SYNCFILE_EXTENSION
 
         # This is where we put the page itself
         @notebook = @element.find(".salvus-ipython-notebook-notebook")
@@ -5045,18 +5067,6 @@ class IPythonNotebook extends FileEditor
         @nb.element.scrollTop(st)
         #console.log("from_obj: done", misc.mswalltime(t))
 
-    # Notebook Doc Format: line 0 is meta information in JSON; one line with the JSON of each cell for reset of file
-    to_doc: () =>
-        #console.log("to_doc: start"); t = misc.mswalltime()
-        obj = @to_obj()
-        if not obj?
-            return
-        doc = misc.to_json({notebook_name:obj.metadata.name})
-        for cell in obj.worksheets[0].cells
-            doc += '\n' + misc.to_json(cell)
-        #console.log("to_doc: done", misc.mswalltime(t))
-        return doc
-
     ###
     # simplistic version of modifying the notebook in place.  VERY slow when new cell added.
     from_doc0: (doc) =>
@@ -5153,6 +5163,61 @@ class IPythonNotebook extends FileEditor
         console.log("from_doc: done", misc.mswalltime(t))
     ###
 
+    # Notebook Doc Format: line 0 is meta information in JSON.
+    # Rest of file has one line for each cell for rest of file, in the following format:
+    #
+    #     cell input text (with newlines replaced) [special unicode character] json object for cell, without input
+    #
+    # We split the line as above so that if/when there are merge conflicts
+    # that result in json corruption, which we then reject, only the *output*
+    # is impacted. The odds of corruption in the output is much less.
+    #
+    cell_to_line: (cell) =>
+        cell = misc.copy(cell)
+        input = misc.to_json(cell.input)
+        delete cell['input']
+        source = misc.to_json(cell.source)
+        delete cell['source']
+        return input + diffsync.MARKERS.output + source + diffsync.MARKERS.output + misc.to_json(cell)
+
+    line_to_cell: (line) =>
+        v = line.split(diffsync.MARKERS.output)
+        try
+            if v[0] == 'undefined'  # backwards incompatibility...
+                input = undefined
+            else
+                input = JSON.parse(v[0])
+        catch e
+            console.log("line_to_cell('#{line}') -- input ERROR=", e)
+            return
+        try
+            if v[1] == 'undefined'  # backwards incompatibility...
+                source = undefined
+            else
+                source = JSON.parse(v[1])
+        catch e
+            console.log("line_to_cell('#{line}') -- source ERROR=", e)
+            return
+        try
+            obj = JSON.parse(v[2])
+            obj.input = input
+            obj.source = source
+            #console.log("line_to_cell('#{line}') -- obj=",obj)
+            return obj
+        catch e
+            console.log("line_to_cell('#{line}') -- output ERROR=", e)
+
+    to_doc: () =>
+        #console.log("to_doc: start"); t = misc.mswalltime()
+        obj = @to_obj()
+        if not obj?
+            return
+        doc = misc.to_json({notebook_name:obj.metadata.name})
+        for cell in obj.worksheets[0].cells
+            doc += '\n' + @cell_to_line(cell)
+        #console.log("to_doc: done", misc.mswalltime(t))
+        return doc
+
     from_doc: (doc) =>
         #console.log("goal='#{doc}'")
         #console.log("live='#{@to_doc()}'")
@@ -5164,6 +5229,7 @@ class IPythonNotebook extends FileEditor
             # reload anyways, so no need to set it here.
             return
 
+        # We want to transform live into goal.
         goal = doc.split('\n')
         live = @to_doc()?.split('\n')
         if not live?
@@ -5181,12 +5247,6 @@ class IPythonNotebook extends FileEditor
         index = 0
         i = 0
 
-        parse = (s) ->
-            try
-                return JSON.parse(s)
-            catch e
-                console.log("UNABLE to parse '#{s}' -- not changing this cell.")
-
         #console.log("diff=#{misc.to_json(diff)}")
         i = 0
         while i < diff.length
@@ -5197,7 +5257,7 @@ class IPythonNotebook extends FileEditor
                 # skip over  cells
                 index += val.length
             else if op == -1
-                # delete  cells:
+                # Deleting cell
                 # A common special case arises when one is editing a single cell, which gets represented
                 # here as deleting then inserting.  Replacing is far more efficient than delete and add,
                 # due to the overhead of creating codemirror instances (presumably).  (Also, there is a
@@ -5205,7 +5265,7 @@ class IPythonNotebook extends FileEditor
                 if i < diff.length - 1 and diff[i+1][0] == 1 and diff[i+1][1].length == val.length
                     #console.log("replace")
                     for x in diff[i+1][1]
-                        obj = parse(string_mapping._to_string[x])
+                        obj = @line_to_cell(string_mapping._to_string[x])
                         if obj?
                             @set_cell(index, obj)
                         index += 1
@@ -5218,7 +5278,7 @@ class IPythonNotebook extends FileEditor
                 # insert new cells
                 #console.log("insert")
                 for x in val
-                    obj = parse(string_mapping._to_string[x])
+                    obj = @line_to_cell(string_mapping._to_string[x])
                     if obj?
                         @insert_cell(index, obj)
                     index += 1
