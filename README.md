@@ -1,1 +1,1 @@
-# Moved to https://github.com/sagemathinc/smc-public
+# MOVED TO  https://github.com/sagemathinc/smc
