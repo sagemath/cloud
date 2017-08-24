@@ -1,1 +1,1 @@
-# MOVED TO  https://github.com/sagemathinc/smc
+# MOVED TO  https://github.com/sagemathinc/cocalc
